@@ -2,9 +2,8 @@ name: Monitor Google Play Reviews
 
 on:
   schedule:
-    # 每 2 小时运行一次（UTC 时间）
     - cron: '0 */2 * * *'
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   monitor:
@@ -12,16 +11,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: Install dependencies
         run: |
           pip install google-api-python-client google-auth requests
-
       - name: Run monitor script
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
