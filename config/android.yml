@@ -1,0 +1,17 @@
+# Google Play 配置
+android:
+  package_name: com.linzi.sport
+  service_account_json: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+  
+  # 如果只想监控特定后一段时间内的评论，可取消下面注释并设置日期（格式 YYYY-MM-DD）
+  # search_after_date: 2024-04-24
+
+  # 是否过滤重复已发送的评论（建议保留 true）
+  ignore_duplicate: true
+
+# 通知配置（飞书/钉钉通用 webhook）
+webhook:
+  url: ${{ secrets.WEBHOOK_URL }}
+  
+  # 通知内容格式：支持 markdown 或 text，推荐 text
+  format: text
