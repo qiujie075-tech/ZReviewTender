@@ -4,6 +4,7 @@ import requests
 import time
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from langdetect import detect  # 新增语言检测库
 
 SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
 PACKAGE_NAME = os.environ.get('PACKAGE_NAME')
@@ -20,14 +21,43 @@ credentials = service_account.Credentials.from_service_account_info(
 )
 service = build("androidpublisher", "v3", credentials=credentials)
 
+def detect_language(text):
+    """检测文本语言，返回语言代码（如 'zh-cn', 'en', 'ja' 等）"""
+    try:
+        lang = detect(text)
+        # 将 'zh-cn', 'zh-tw' 统一为 'zh'
+        if lang.startswith('zh'):
+            return 'zh'
+        return lang
+    except:
+        return 'en'  # 默认英语
+
 def generate_reply(text):
+    """根据评论语言生成同语言回复"""
+    lang = detect_language(text)
+    # 根据语言设置 system prompt
+    lang_prompts = {
+        'zh': "你是专业的客服助手，请用中文友好、简洁地回复用户评论。",
+        'en': "You are a professional customer service assistant. Please reply to user reviews in English, friendly and concise.",
+        'ja': "あなたは専門のカスタマーサポートアシスタントです。ユーザーのレビューに対して、親切で簡潔な日本語で返信してください。",
+        'ko': "당신은 전문 고객 서비스 어시스턴트입니다. 사용자 리뷰에 친절하고 간결한 한국어로 답변하세요.",
+        'es': "Eres un asistente de servicio al cliente profesional. Responde a las reseñas de los usuarios en español, de manera amable y concisa.",
+        'fr': "Vous êtes un assistant de service client professionnel. Répondez aux avis des utilisateurs en français, de manière amicale et concise.",
+        'de': "Sie sind ein professioneller Kundendienstassistent. Antworten Sie auf Benutzerbewertungen auf Deutsch, freundlich und prägnant.",
+        'it': "Sei un assistente di servizio clienti professionale. Rispondi alle recensioni degli utenti in italiano, in modo amichevole e conciso.",
+        'pt': "Você é um assistente de atendimento ao cliente profissional. Responda às avaliações dos usuários em português, de forma amigável e concisa.",
+        'ru': "Вы профессиональный помощник службы поддержки. Отвечайте на отзывы пользователей на русском языке, дружелюбно и лаконично.",
+        'ar': "أنت مساعد خدمة عملاء محترف. قم بالرد على تقييمات المستخدمين باللغة العربية، بطريقة ودية ومختصرة."
+    }
+    system_prompt = lang_prompts.get(lang, lang_prompts['en'])  # 默认英语
+
     url = "https://router.huggingface.co/v1/chat/completions"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
     data = {
         "model": "moonshotai/Kimi-K2-Instruct-0905",
         "messages": [
-            {"role": "system", "content": "你是专业的客服助手，请用中文友好、简洁地回复用户评论。"},
-            {"role": "user", "content": f"请回复这条评论：{text}"}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Please reply to this review: {text}"}
         ],
         "temperature": 0.7,
         "max_tokens": 150
@@ -35,10 +65,13 @@ def generate_reply(text):
     try:
         resp = requests.post(url, headers=headers, json=data, timeout=15)
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        reply = resp.json()["choices"][0]["message"]["content"].strip()
+        print(f"检测到语言: {lang}, 回复已生成")
+        return reply
     except Exception as e:
         print(f"AI 调用失败: {e}")
-        return "感谢您的反馈，我们会持续改进！"
+        # 降级为默认多语言回复
+        return "Thank you for your feedback! We will continue to improve." if lang == 'en' else "感谢您的反馈，我们会持续改进！"
 
 def post_reply(review_id, reply):
     service.reviews().reply(
