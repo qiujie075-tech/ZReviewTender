@@ -23,14 +23,12 @@ credentials = service_account.Credentials.from_service_account_info(
 service = build("androidpublisher", "v3", credentials=credentials)
 
 def generate_reply(comment_text):
-    """让 AI 自动识别语言并回复，不依赖外部检测库"""
+    """调用 AI 生成回复，并确保返回非空字符串"""
     url = "https://router.huggingface.co/v1/chat/completions"
     headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
-    # 让模型自己判断语言并回复
     system_prompt = (
         "You are a customer service assistant. Reply to the user's review in the SAME language as the review. "
-        "If the review is in French, reply in French; if in English, reply in English; if in Chinese, reply in Chinese, etc. "
-        "Be friendly, concise, and helpful."
+        "Keep the reply SHORT and CONCISE (under 300 characters). Be friendly and helpful."
     )
     data = {
         "model": "moonshotai/Kimi-K2-Instruct-0905",
@@ -45,13 +43,22 @@ def generate_reply(comment_text):
         resp = requests.post(url, headers=headers, json=data, timeout=15)
         resp.raise_for_status()
         reply = resp.json()["choices"][0]["message"]["content"].strip()
-        print(f"  ✅ AI 回复生成成功")
+        print(f"  AI 原始回复: {reply[:100]}...")
+        # 确保回复不为空
+        if not reply:
+            reply = "Thank you for your feedback!"
+        # 截断过长回复（最多 350 字符）
+        if len(reply) > 350:
+            reply = reply[:350] + "..."
         return reply
     except Exception as e:
-        print(f"  ❌ AI 调用失败: {e}")
-        return "Thank you for your feedback!"  # 保底英文
+        print(f"  AI 调用失败: {e}")
+        return "Thank you for your feedback!"
 
 def post_reply(review_id, reply):
+    if not reply or len(reply) == 0:
+        print(f"  ❌ 回复文本为空，跳过回复 {review_id}")
+        return False
     try:
         service.reviews().reply(
             packageName=PACKAGE_NAME,
@@ -68,10 +75,11 @@ def send_report(success, total):
     data = {"msgtype": "text", "text": {"content": f"自动回复完成：成功 {success}/{total}"}}
     try:
         requests.post(WEBHOOK_URL, json=data, timeout=10)
+        print("通知推送成功")
     except Exception as e:
         print(f"通知失败: {e}")
 
-# 获取更多评论（尝试 100 条）
+# 获取评论
 print("正在获取评论...")
 try:
     response = service.reviews().list(packageName=PACKAGE_NAME, maxResults=100).execute()
@@ -81,23 +89,19 @@ except Exception as e:
     print(f"获取评论失败: {e}")
     raise
 
-# 严格判断未回复：replies 字段不存在，或者存在但为空列表/空字典
 unreplied = []
-processed_ids = set()  # 防止重复处理同一条
+processed_ids = set()
 
 for idx, review in enumerate(reviews):
     review_id = review.get("reviewId")
     if not review_id or review_id in processed_ids:
         continue
 
-    # 判断是否有回复：检查 replies 字段
     replies = review.get("replies")
     has_reply = False
     if replies:
-        # 如果 replies 是一个列表且长度 > 0
         if isinstance(replies, list) and len(replies) > 0:
             has_reply = True
-        # 如果 replies 是一个字典且非空
         elif isinstance(replies, dict) and replies:
             has_reply = True
 
@@ -123,9 +127,10 @@ for review in unreplied:
     comment_text = user_comment.get("text", "")
     print(f"\n处理评论 {rid}: {comment_text[:80]}...")
     reply = generate_reply(comment_text)
+    print(f"  最终回复内容: {reply[:100]}...")
     if post_reply(rid, reply):
         success += 1
-    time.sleep(2)  # 避免频率限制
+    time.sleep(2)
 
 send_report(success, len(unreplied))
 print("执行完成")
