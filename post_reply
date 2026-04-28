@@ -1,0 +1,35 @@
+def post_reply(review_id, reply_text):
+    url = "https://api.appstoreconnect.apple.com/v1/customerReviewResponses"
+    headers = {
+        "Authorization": f"Bearer {generate_token()}",
+        "Content-Type": "application/json",
+        "Accept": "application/json"
+    }
+    payload = {
+        "data": {
+            "type": "customerReviewResponses",
+            "attributes": {
+                "responseBody": reply_text
+            },
+            "relationships": {
+                "review": {
+                    "data": {
+                        "id": review_id,
+                        "type": "customerReviews"
+                    }
+                }
+            }
+        }
+    }
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        print(f"苹果回复 API 状态码: {resp.status_code}")
+        if resp.status_code == 201:
+            print(f"✅ 回复成功 {review_id}")
+            return True
+        else:
+            print(f"❌ 回复失败 {review_id}: {resp.status_code} {resp.text}")
+            return False
+    except Exception as e:
+        print(f"❌ 回复异常 {review_id}: {e}")
+        return False
