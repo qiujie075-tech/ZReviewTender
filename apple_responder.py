@@ -43,7 +43,7 @@ def generate_ai_reply(text):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     data = {
-        "model": "llama3-8b-8192",
+        "model": "llama-3.1-8b-instant",
         "messages": [
             {"role": "system", "content": "Reply in the same language as the user. Keep under 300 characters."},
             {"role": "user", "content": f"Reply to this review: {text}"}
@@ -52,7 +52,9 @@ def generate_ai_reply(text):
     }
     try:
         resp = requests.post(url, headers=headers, json=data, timeout=20)
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            print(f"Groq 错误: {resp.status_code} - {resp.text}")
+            return "Thank you for your feedback!"
         reply = resp.json()["choices"][0]["message"]["content"].strip()
         if not reply:
             return "Thank you for your feedback!"
@@ -62,8 +64,8 @@ def generate_ai_reply(text):
         return "Thank you for your feedback!"
 
 def post_reply(review_id, reply_text):
-    url = "https://api.appstoreconnect.apple.com/v1/customerReviewResponses"
-    token = generate_token(["POST /v1/customerReviewResponses"])
+    url = f"https://api.appstoreconnect.apple.com/v1/customerReviews/{review_id}"
+    token = generate_token([f"PATCH /v1/customerReviews/{review_id}"])
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
@@ -71,31 +73,31 @@ def post_reply(review_id, reply_text):
     }
     payload = {
         "data": {
-            "type": "customerReviewResponses",
-            "attributes": {
-                "responseBody": reply_text
-            },
+            "type": "customerReviews",
+            "id": review_id,
             "relationships": {
-                "review": {
+                "response": {
                     "data": {
-                        "id": review_id,
-                        "type": "customerReviews"
+                        "type": "customerReviewResponses",
+                        "attributes": {
+                            "responseBody": reply_text
+                        }
                     }
                 }
             }
         }
     }
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        print(f"发送回复响应: {resp.status_code}")
+        resp = requests.patch(url, headers=headers, json=payload, timeout=15)
+        print(f"回复响应: {resp.status_code}")
         if resp.status_code in (200, 201):
-            print(f"✅ 回复成功 {review_id}")
+            print(f"✅ 成功 {review_id}")
             return True
         else:
-            print(f"❌ 回复失败 {review_id}: {resp.status_code} {resp.text}")
+            print(f"❌ 失败 {review_id}: {resp.status_code} {resp.text}")
             return False
     except Exception as e:
-        print(f"❌ 回复异常 {review_id}: {e}")
+        print(f"❌ 异常 {review_id}: {e}")
         return False
 
 def main():
@@ -109,7 +111,7 @@ def main():
         text = rev.get("attributes", {}).get("body", "")
         if text:
             unreplied.append((rev["id"], text))
-    print(f"未回复评论: {len(unreplied)} 条")
+    print(f"未回复: {len(unreplied)} 条")
     success = 0
     for rid, text in unreplied:
         print(f"\n处理 {rid}: {text[:80]}...")
@@ -119,7 +121,7 @@ def main():
             success += 1
         time.sleep(2)
     if WEBHOOK_URL:
-        data = {"msgtype": "text", "text": {"content": f"🍎 苹果 AI 回复完成：成功 {success}/{len(unreplied)}"}}
+        data = {"msgtype": "text", "text": {"content": f"🍎 完成：成功 {success}/{len(unreplied)}"}}
         try:
             requests.post(WEBHOOK_URL, json=data, timeout=10)
         except:
