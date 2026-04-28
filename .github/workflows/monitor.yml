@@ -1,0 +1,22 @@
+name: Google Play Auto Reply
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
+
+jobs:
+  reply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install google-api-python-client google-auth requests langdetect
+      - run: python monitor.py
+        env:
+          SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
+          PACKAGE_NAME: ${{ secrets.PACKAGE_NAME }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
