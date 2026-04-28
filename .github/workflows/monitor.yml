@@ -10,10 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Cache replied IDs
+        uses: actions/cache@v3
+        with:
+          path: replied_ids.txt
+          key: replied-ids-${{ github.run_id }}
+          restore-keys: |
+            replied-ids-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install google-api-python-client google-auth requests
+      - run: pip install google-api-python-client google-auth requests langdetect
       - run: python monitor.py
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
