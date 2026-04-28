@@ -13,13 +13,13 @@ WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 HF_TOKEN = os.environ.get('HF_TOKEN')
 CACHE_FILE = "replied_ids.txt"
 
-print("=== 自动回复启动（安全防重复版）===")
+print("=== 自动回复启动（安全防重复版 - 时间戳修复）===")
 print(f"PACKAGE_NAME = {PACKAGE_NAME}")
 
 if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL, HF_TOKEN]):
     raise Exception("缺少必要的环境变量")
 
-# 读取缓存（仅用于记录，不作为主要判断依据）
+# 读取缓存
 replied_ids_cache = set()
 if os.path.exists(CACHE_FILE):
     with open(CACHE_FILE, "r") as f:
@@ -69,12 +69,12 @@ def generate_reply(comment_text):
         if len(reply) > 350:
             reply = reply[:350] + "..."
         if not reply:
-            raise ValueError("Empty")
-        # 后检验语言（可选）
+            raise ValueError("Empty reply")
+        # 可选语言校验
         reply_lang = detect_language(reply)
         if reply_lang != lang and lang != 'en':
             print(f"  语言不匹配，使用模板")
-            raise ValueError("Lang mismatch")
+            raise ValueError("Language mismatch")
         return reply
     except Exception as e:
         print(f"  AI 降级: {e}")
@@ -121,7 +121,6 @@ except Exception as e:
     print(f"获取评论失败: {e}")
     raise
 
-# 时间过滤：只处理最近48小时内的评论
 now = datetime.now(timezone.utc)
 cutoff_time = now - timedelta(hours=48)
 
@@ -134,7 +133,7 @@ for review in reviews:
     if not review_id:
         continue
 
-    # 1. 检查官方 API 回复状态（最权威）
+    # 检查官方回复状态
     replies = review.get("replies")
     has_reply = False
     if replies:
@@ -146,12 +145,22 @@ for review in reviews:
         elif isinstance(replies, dict) and replies.get("text"):
             has_reply = True
 
-    # 2. 获取评论时间
+    # 获取评论时间和文本
     comments = review.get("comments", [])
     if not comments:
         continue
     user_comment = comments[0].get("userComment", {})
-    timestamp_seconds = user_comment.get("lastModified", {}).get("seconds", 0)
+    timestamp_data = user_comment.get("lastModified", {})
+    timestamp_seconds = timestamp_data.get("seconds")
+    # 确保时间戳为整数
+    try:
+        if timestamp_seconds is not None:
+            timestamp_seconds = int(timestamp_seconds)
+        else:
+            timestamp_seconds = 0
+    except (ValueError, TypeError):
+        timestamp_seconds = 0
+
     if timestamp_seconds:
         comment_time = datetime.fromtimestamp(timestamp_seconds, tz=timezone.utc)
         is_recent = comment_time >= cutoff_time
@@ -163,7 +172,6 @@ for review in reviews:
     if has_reply:
         print(f"跳过 {review_id}: 已有回复")
         skipped_count += 1
-        # 同步更新缓存
         new_ids.append(review_id)
         continue
 
@@ -177,7 +185,6 @@ for review in reviews:
         skipped_count += 1
         continue
 
-    # 真正未回复的评论
     unreplied.append(review)
     print(f"待回复: {review_id} - {comment_text[:50]}...")
 
@@ -195,8 +202,9 @@ for review in unreplied:
         new_ids.append(rid)
     time.sleep(2)
 
-# 更新缓存文件（记录所有已处理的ID，包括跳过的）
 if new_ids:
+    # 用追加模式写入，但实际希望去重，可以在写入前转换为集合再写入
+    # 简单处理：将所有 new_ids 去重后写入，但缓存文件可能会累积重复行，不过不影响判重（读入时是 set）
     with open(CACHE_FILE, "a") as f:
         for rid in set(new_ids):
             f.write(rid + "\n")
