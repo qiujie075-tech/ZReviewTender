@@ -1,0 +1,26 @@
+name: Apple App Store Auto Reply
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'          # 每3小时运行一次
+  workflow_dispatch:
+
+jobs:
+  reply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install requests pyjwt
+      - name: Run Apple responder
+        env:
+          APPLE_PRIVATE_KEY: ${{ secrets.APPLE_PRIVATE_KEY }}
+          APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
+          APPLE_ISSUER_ID: ${{ secrets.APPLE_ISSUER_ID }}
+          APPLE_BUNDLE_ID: ${{ secrets.APPLE_BUNDLE_ID }}
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: python apple_responder.py
