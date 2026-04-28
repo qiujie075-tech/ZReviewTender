@@ -2,19 +2,27 @@ import os
 import json
 import time
 import requests
-from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
 PACKAGE_NAME = os.environ.get('PACKAGE_NAME')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
+CACHE_FILE = "replied_ids.txt"
 
-print("=== 谷歌商店自动回复（基于官方最后回复时间）===")
+print("=== 谷歌商店自动回复（基于本地记录文件）===")
 
 if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL]):
     raise Exception("缺少必要的环境变量")
 
+# ========== 读取已回复记录 ==========
+replied_ids = set()
+if os.path.exists(CACHE_FILE):
+    with open(CACHE_FILE, "r") as f:
+        replied_ids = set(line.strip() for line in f if line.strip())
+    print(f"已加载 {len(replied_ids)} 条历史回复记录")
+
+# ========== Google 认证 ==========
 creds_info = json.loads(SERVICE_ACCOUNT_JSON)
 credentials = service_account.Credentials.from_service_account_info(
     creds_info,
@@ -22,6 +30,7 @@ credentials = service_account.Credentials.from_service_account_info(
 )
 service = build("androidpublisher", "v3", credentials=credentials)
 
+# ========== 语言检测与回复模板 ==========
 def detect_language(text):
     if any('\u4e00' <= ch <= '\u9fff' for ch in text):
         return 'zh'
@@ -41,25 +50,19 @@ def get_reply(text):
     }
     return replies.get(lang, replies['en'])
 
-def get_unreplied_reviews():
+# ========== 获取所有评论（不过滤官方 replies） ==========
+def get_all_reviews():
     try:
         response = service.reviews().list(packageName=PACKAGE_NAME, maxResults=100).execute()
         reviews = response.get("reviews", [])
-        print(f"总评论数: {len(reviews)}")
-        unreplied = []
+        print(f"API 返回评论总数: {len(reviews)}")
+        
+        result = []
         for review in reviews:
-            # 方法1：检查是否有回复（官方字段）
-            replies = review.get("replies")
-            if replies and isinstance(replies, list) and len(replies) > 0:
-                print(f"跳过 {review.get('reviewId')}: 已有回复")
+            review_id = review.get("reviewId")
+            if not review_id:
                 continue
-            # 方法2：检查最后回复时间（最权威）
-            last_reply_time = review.get("lastModified", {}).get("seconds")
-            if last_reply_time:
-                # 如果最后修改时间不是评论文本的修改时间，而是回复的时间，则说明已回复
-                # 但我们简单起见，只要存在 replies 列表就不处理
-                pass
-            # 提取评论文本
+            # 获取评论文本
             comments = review.get("comments", [])
             if not comments:
                 continue
@@ -67,15 +70,16 @@ def get_unreplied_reviews():
             text = user_comment.get("text", "")
             if not text:
                 continue
-            unreplied.append({
-                "id": review["reviewId"],
+            result.append({
+                "id": review_id,
                 "text": text
             })
-        return unreplied
+        return result
     except Exception as e:
-        print(f"获取失败: {e}")
+        print(f"获取评论失败: {e}")
         return []
 
+# ========== 发布回复 ==========
 def post_reply(review_id, reply_text):
     try:
         service.reviews().reply(
@@ -83,33 +87,54 @@ def post_reply(review_id, reply_text):
             reviewId=review_id,
             body={"replyText": reply_text}
         ).execute()
-        print(f"  ✅ 成功: {review_id}")
+        print(f"  ✅ 回复成功: {review_id}")
         return True
     except Exception as e:
-        print(f"  ❌ 失败: {review_id} - {e}")
+        print(f"  ❌ 回复失败: {review_id} - {e}")
         return False
 
-def send_report(success, total):
-    data = {"msgtype": "text", "text": {"content": f"谷歌回复完成：成功 {success}/{total}"}}
-    try:
-        requests.post(WEBHOOK_URL, json=data, timeout=10)
-    except:
-        pass
+# ========== 发送通知 ==========
+def send_report(success, total, skipped):
+    if WEBHOOK_URL:
+        data = {"msgtype": "text", "text": {"content": f"谷歌回复完成：成功 {success}/{total}，跳过 {skipped} 条已回复"}}
+        try:
+            requests.post(WEBHOOK_URL, json=data, timeout=10)
+        except:
+            pass
 
-print("获取未回复评论...")
-unreplied = get_unreplied_reviews()
-print(f"未回复: {len(unreplied)} 条")
+# ========== 主程序 ==========
+print("获取所有评论...")
+all_reviews = get_all_reviews()
+print(f"共获取 {len(all_reviews)} 条评论")
+
+# 筛选未回复的（基于本地缓存，不依赖官方 replies）
+to_reply = []
+for review in all_reviews:
+    if review["id"] in replied_ids:
+        continue
+    to_reply.append(review)
+print(f"需要回复: {len(to_reply)} 条")
 
 success = 0
-for review in unreplied:
+new_ids = []
+for review in to_reply:
     rid = review["id"]
     text = review["text"]
     print(f"\n处理 {rid}: {text[:80]}...")
     reply = get_reply(text)
-    print(f"回复: {reply}")
+    print(f"  回复: {reply}")
     if post_reply(rid, reply):
         success += 1
+        new_ids.append(rid)
     time.sleep(2)
 
-send_report(success, len(unreplied))
-print("完成")
+# 更新缓存文件
+if new_ids:
+    with open(CACHE_FILE, "a") as f:
+        for rid in new_ids:
+            f.write(rid + "\n")
+    replied_ids.update(new_ids)
+    print(f"已更新缓存，新增 {len(new_ids)} 条记录")
+
+send_report(success, len(to_reply), len(all_reviews) - len(to_reply))
+print("执行完成")
