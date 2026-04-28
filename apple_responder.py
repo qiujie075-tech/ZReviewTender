@@ -9,82 +9,74 @@ from datetime import datetime, timedelta
 PRIVATE_KEY = os.environ.get('APPLE_PRIVATE_KEY')
 KEY_ID = os.environ.get('APPLE_KEY_ID')
 ISSUER_ID = os.environ.get('APPLE_ISSUER_ID')
-APP_ID = "1598065258"  # 你的 App Apple ID
+APP_ID = "1598065258"  # 你的 Apple ID，固定
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
-HF_TOKEN = os.environ.get('HF_TOKEN')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY')  # 新增：Groq API Key（免费）
 
-# ========== 辅助函数：生成带 scope 的 Token ==========
-def generate_token(allowed_scope):
-    """
-    allowed_scope: 一个字符串列表，例如 ["GET /v1/apps/1234567890/customerReviews"]
-    """
-    if not allowed_scope:
-        allowed_scope = []
-    
+if not GROQ_API_KEY:
+    raise Exception("缺少 GROQ_API_KEY，请去 https://console.groq.com 免费注册获取")
+
+def generate_token(scope):
     headers = {"alg": "ES256", "kid": KEY_ID, "typ": "JWT"}
     payload = {
         "iss": ISSUER_ID,
-        "exp": int(datetime.utcnow().timestamp()) + 20 * 60,  # 20分钟有效
+        "exp": int(datetime.utcnow().timestamp()) + 20 * 60,
         "aud": "appstoreconnect-v1",
-        "scope": allowed_scope  # 关键：限定此 token 的权限范围
+        "scope": scope
     }
-    token = jwt.encode(payload, PRIVATE_KEY, algorithm='ES256', headers=headers)
-    return token
+    return jwt.encode(payload, PRIVATE_KEY, algorithm='ES256', headers=headers)
 
-# ========== 1. 获取评论 ==========
 def get_reviews():
-    """使用正确 endpoint 获取评论列表"""
-    url = f"https://api.appstoreconnect.apple.com/v1/apps/{APP_ID}/customerReviews?limit=50&sort=-createdDate"
-    # 生成一个只允许 GET 操作的 token
+    """获取评论列表"""
+    url = f"https://api.appstoreconnect.apple.com/v1/apps/{APP_ID}/customerReviews?limit=50"
     token = generate_token([f"GET /v1/apps/{APP_ID}/customerReviews"])
     headers = {"Authorization": f"Bearer {token}"}
-    
     try:
         resp = requests.get(url, headers=headers, timeout=15)
-        print(f"苹果 API 响应状态 (获取评论): {resp.status_code}")
         if resp.status_code != 200:
-            print(f"错误响应体: {resp.text}")
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("data", [])
+            print(f"获取评论失败: {resp.status_code} {resp.text}")
+            return []
+        return resp.json().get("data", [])
     except Exception as e:
-        print(f"获取苹果评论失败: {e}")
+        print(f"获取评论异常: {e}")
         return []
 
-# ========== 2. AI 生成回复 ==========
-def generate_reply(text):
-    """调用 Hugging Face API 生成回复 (保持不变)"""
-    url = "https://router.huggingface.co/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}", "Content-Type": "application/json"}
-    system_prompt = "Reply in the same language as the user. Keep short (max 300 characters)."
+def generate_ai_reply(text):
+    """使用 Groq 免费 API 生成 AI 回复"""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
     data = {
-        "model": "moonshotai/Kimi-K2-Instruct-0905",
+        "model": "llama3-8b-8192",  # 完全免费，速度快
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": "You are a customer service assistant. Reply in the SAME language as the user. Keep under 300 characters. Be friendly and helpful."},
             {"role": "user", "content": f"Reply to this review: {text}"}
         ],
-        "max_tokens": 150,
-        "temperature": 0.7
+        "temperature": 0.7,
+        "max_tokens": 200
     }
     try:
-        resp = requests.post(url, headers=headers, json=data, timeout=15)
+        resp = requests.post(url, headers=headers, json=data, timeout=20)
         resp.raise_for_status()
         reply = resp.json()["choices"][0]["message"]["content"].strip()
         if not reply:
-            raise ValueError("Empty")
+            return "Thank you for your feedback!"
         reply = ' '.join(reply.split())
         if len(reply) > 350:
             reply = reply[:350] + "..."
         return reply
     except Exception as e:
-        print(f"AI 调用失败: {e}")
+        print(f"Groq AI 调用失败: {e}")
+        # 降级为模板回复
+        if any('\u4e00' <= ch <= '\u9fff' for ch in text):
+            return "感谢您的反馈，我们会持续改进！"
         return "Thank you for your feedback! We will continue to improve."
 
-# ========== 3. 发送回复 ==========
-def post_reply(review_id, reply):
-    """使用 customerReviewResponses 资源发送回复"""
+def post_reply(review_id, reply_text):
+    """发送 AI 生成的回复（苹果官方正确 endpoint）"""
     url = "https://api.appstoreconnect.apple.com/v1/customerReviewResponses"
-    # 生成一个只允许 POST 此特定资源的 token
     token = generate_token(["POST /v1/customerReviewResponses"])
     headers = {
         "Authorization": f"Bearer {token}",
@@ -92,8 +84,9 @@ def post_reply(review_id, reply):
     }
     payload = {
         "data": {
+            "type": "customerReviewResponses",
             "attributes": {
-                "responseBody": reply
+                "responseBody": reply_text
             },
             "relationships": {
                 "review": {
@@ -102,43 +95,31 @@ def post_reply(review_id, reply):
                         "type": "customerReviews"
                     }
                 }
-            },
-            "type": "customerReviewResponses"
+            }
         }
     }
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code in (200, 201):
-            print(f"✅ 回复成功: {review_id}")
+            print(f"✅ 回复成功 {review_id}")
             return True
         else:
             print(f"❌ 回复失败 {review_id}: {resp.status_code} {resp.text}")
             return False
     except Exception as e:
-        print(f"❌ 回复失败 {review_id}: {e}")
+        print(f"❌ 回复异常 {review_id}: {e}")
         return False
 
-# ========== 4. 发送通知 ==========
-def send_report(success, total):
-    if WEBHOOK_URL:
-        data = {"msgtype": "text", "text": {"content": f"Apple 自动回复完成：成功 {success}/{total}"}}
-        try:
-            requests.post(WEBHOOK_URL, json=data, timeout=10)
-        except Exception as e:
-            print(f"通知失败: {e}")
-
-# ========== 主逻辑 ==========
 def main():
-    print("=== Apple App Store 自动回复启动 (修复版) ===")
+    print("=== Apple App Store AI 自动回复（Groq免费版）===")
     
-    # 1. 获取评论
+    # 获取评论
     reviews = get_reviews()
     print(f"获取到 {len(reviews)} 条评论")
     
-    # 2. 筛选未回复的评论
+    # 筛选未回复的
     unreplied = []
     for rev in reviews:
-        # 检查是否有 reply relationship
         if "relationships" in rev and "reply" in rev["relationships"]:
             continue
         text = rev.get("attributes", {}).get("body", "")
@@ -147,17 +128,25 @@ def main():
     
     print(f"未回复评论: {len(unreplied)} 条")
     
-    # 3. 逐条回复
+    # 逐条生成 AI 回复并发布
     success = 0
     for rid, text in unreplied:
         print(f"\n处理 {rid}: {text[:80]}...")
-        reply = generate_reply(text)
+        reply = generate_ai_reply(text)
+        print(f"AI 回复: {reply[:100]}...")
         if post_reply(rid, reply):
             success += 1
-        time.sleep(2)  # 避免请求过快
+        time.sleep(2)
     
-    # 4. 发送报告
-    send_report(success, len(unreplied))
+    # 发送报告到飞书/钉钉
+    if WEBHOOK_URL:
+        data = {"msgtype": "text", "text": {"content": f"🍎 苹果 AI 回复完成：成功 {success}/{len(unreplied)}"}}
+        try:
+            requests.post(WEBHOOK_URL, json=data, timeout=10)
+            print("通知推送成功")
+        except Exception as e:
+            print(f"通知失败: {e}")
+    
     print("执行完成")
 
 if __name__ == "__main__":
