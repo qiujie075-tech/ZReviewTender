@@ -10,6 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Restore replied IDs cache
+        uses: actions/cache@v3
+        with:
+          path: replied_ids.txt
+          key: replied-ids-cache
+          restore-keys: |
+            replied-ids-cache
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
