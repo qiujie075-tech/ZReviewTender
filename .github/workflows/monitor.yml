@@ -10,10 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Restore processed IDs cache
+        uses: actions/cache@v3
+        with:
+          path: processed_ids.txt
+          key: processed-ids-cache
+          restore-keys: |
+            processed-ids-cache
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install google-api-python-client google-auth requests langdetect
+      - run: pip install google-api-python-client google-auth requests
       - run: python monitor.py
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
