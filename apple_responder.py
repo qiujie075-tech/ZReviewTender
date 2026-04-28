@@ -25,10 +25,17 @@ def generate_token():
     return jwt.encode(payload, PRIVATE_KEY, algorithm='ES256', headers=headers)
 
 def get_reviews():
-    url = f"https://api.appstoreconnect.apple.com/v1/customerReviews?filter[appBundleId]={BUNDLE_ID}&limit=50"
-    headers = {"Authorization": f"Bearer {generate_token()}"}
+    # 增加 sort 参数，添加 User-Agent
+    url = f"https://api.appstoreconnect.apple.com/v1/customerReviews?filter[appBundleId]={BUNDLE_ID}&limit=50&sort=-createdDate"
+    headers = {
+        "Authorization": f"Bearer {generate_token()}",
+        "User-Agent": "AutoReplyBot/1.0"
+    }
     try:
         resp = requests.get(url, headers=headers, timeout=15)
+        print(f"苹果 API 响应状态: {resp.status_code}")
+        if resp.status_code != 200:
+            print(f"错误响应体: {resp.text}")
         resp.raise_for_status()
         return resp.json().get("data", [])
     except Exception as e:
@@ -64,7 +71,11 @@ def generate_reply(text):
 
 def post_reply(review_id, reply):
     url = f"https://api.appstoreconnect.apple.com/v1/customerReviews/{review_id}/reply"
-    headers = {"Authorization": f"Bearer {generate_token()}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {generate_token()}",
+        "Content-Type": "application/json",
+        "User-Agent": "AutoReplyBot/1.0"
+    }
     data = {"data": {"attributes": {"body": reply}}}
     try:
         resp = requests.post(url, headers=headers, json=data, timeout=15)
@@ -92,7 +103,6 @@ def main():
     print(f"获取到 {len(reviews)} 条评论")
     unreplied = []
     for rev in reviews:
-        # 如果已有回复则跳过
         if "relationships" in rev and "reply" in rev["relationships"]:
             continue
         text = rev.get("attributes", {}).get("body", "")
