@@ -2,7 +2,7 @@ name: Apple App Store Auto Reply
 
 on:
   schedule:
-    - cron: '0 */3 * * *'          # 每3小时运行一次
+    - cron: '0 */3 * * *'
   workflow_dispatch:
 
 jobs:
@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install dependencies
-        run: pip install requests pyjwt
+        run: pip install requests pyjwt cryptography
       - name: Run Apple responder
         env:
           APPLE_PRIVATE_KEY: ${{ secrets.APPLE_PRIVATE_KEY }}
