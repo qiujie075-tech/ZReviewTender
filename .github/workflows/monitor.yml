@@ -26,3 +26,4 @@ jobs:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
           PACKAGE_NAME: ${{ secrets.PACKAGE_NAME }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
