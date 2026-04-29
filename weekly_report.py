@@ -7,21 +7,25 @@ from collections import Counter
 from dateutil import parser
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+import time
+import hmac
+import hashlib
+import base64
+import urllib.parse
 
 # ========== 环境变量 ==========
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
 PACKAGE_NAME = os.environ.get('PACKAGE_NAME')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
+DINGTALK_SECRET = os.environ.get('DINGTALK_SECRET')
 
-print("=== 每周双平台回复报告 ===")
-print(f"WEBHOOK_URL 存在: {bool(WEBHOOK_URL)}")
-print(f"PACKAGE_NAME: {PACKAGE_NAME}")
+print("=== 每周双平台回复报告（详细版）===")
 
 if not all([WEBHOOK_URL, SERVICE_ACCOUNT_JSON, PACKAGE_NAME]):
     raise Exception("缺少必要的环境变量")
 
-# ========== Google 认证 ==========
+# Google 认证
 creds_info = json.loads(SERVICE_ACCOUNT_JSON)
 credentials = service_account.Credentials.from_service_account_info(
     creds_info,
@@ -30,8 +34,8 @@ credentials = service_account.Credentials.from_service_account_info(
 service = build("androidpublisher", "v3", credentials=credentials)
 
 def detect_sentiment(text):
-    positive_words = ['good', 'great', 'awesome', 'love', 'perfect', 'best', 'nice', 'happy', 'helpful', 'easy', 'like', 'excellent', 'amazing']
-    negative_words = ['bad', 'terrible', 'awful', 'hate', 'worst', 'useless', 'broken', 'crash', 'bug', 'slow', 'confusing', 'frustrating', 'disappointed']
+    positive_words = ['good', 'great', 'awesome', 'love', 'perfect', 'best', 'nice', 'happy', 'helpful', 'easy', 'like', 'excellent', 'amazing', 'works well', 'stable']
+    negative_words = ['bad', 'terrible', 'awful', 'hate', 'worst', 'useless', 'broken', 'crash', 'bug', 'slow', 'confusing', 'frustrating', 'disappointed', 'waste', 'stupid']
     text_lower = text.lower()
     pos = sum(1 for w in positive_words if w in text_lower)
     neg = sum(1 for w in negative_words if w in text_lower)
@@ -41,14 +45,34 @@ def detect_sentiment(text):
         return 'negative'
     return 'neutral'
 
+def extract_key_phrases(text):
+    """提取关键问题短语"""
+    phrases = []
+    keywords = {
+        'crash': ['crash', 'crashes', 'crashed', 'freeze', 'frozen'],
+        'bug': ['bug', 'bugs', 'glitch', 'error'],
+        'slow': ['slow', 'lag', 'delay', 'loading'],
+        'confusing': ['confusing', 'hard to use', 'unclear', 'complicated', 'chaotic'],
+        'translation': ['french', 'français', 'english', 'language', 'traduction', 'version'],
+        'feature': ['feature', 'option', 'function', 'ability', 'missing'],
+        'ads': ['ad', 'ads', 'advertisement', 'popup'],
+        'sync': ['sync', 'save', 'lost', 'data'],
+        'login': ['login', 'sign in', 'account', 'register'],
+        'ui': ['interface', 'design', 'layout', 'navigation', 'menu']
+    }
+    for category, kws in keywords.items():
+        for kw in kws:
+            if kw in text.lower():
+                phrases.append(category)
+                break
+    return list(set(phrases))
+
 def get_google_reviews():
-    """获取谷歌最近7天评论"""
     print("正在获取谷歌评论...")
     try:
         response = service.reviews().list(packageName=PACKAGE_NAME, maxResults=100).execute()
         reviews = response.get("reviews", [])
         print(f"谷歌 API 返回评论总数: {len(reviews)}")
-        
         cutoff = datetime.now() - timedelta(days=7)
         result = []
         for review in reviews:
@@ -59,50 +83,38 @@ def get_google_reviews():
             timestamp_seconds = user_comment.get("lastModified", {}).get("seconds", 0)
             text = user_comment.get("text", "")
             star_rating = user_comment.get("starRating", 0)
-            
             if not text:
                 continue
-            
-            # 时间过滤
             if timestamp_seconds:
                 comment_time = datetime.fromtimestamp(int(timestamp_seconds))
                 if comment_time >= cutoff:
                     result.append({
                         "text": text,
                         "rating": star_rating,
-                        "sentiment": detect_sentiment(text)
+                        "sentiment": detect_sentiment(text),
+                        "phrases": extract_key_phrases(text)
                     })
-                    print(f"  ✓ 收录: {text[:50]}... (评分: {star_rating})")
             else:
-                # 没有时间戳也收录（兼容旧数据）
                 result.append({
                     "text": text,
                     "rating": star_rating,
-                    "sentiment": detect_sentiment(text)
+                    "sentiment": detect_sentiment(text),
+                    "phrases": extract_key_phrases(text)
                 })
-                print(f"  ✓ 收录(无时间戳): {text[:50]}...")
-        
-        print(f"谷歌本周评论: {len(result)} 条")
         return result
     except Exception as e:
-        print(f"❌ 获取谷歌评论失败: {e}")
+        print(f"获取谷歌评论失败: {e}")
         return []
 
 def get_apple_reviews():
-    """获取苹果最近7天评论"""
     print("正在获取苹果评论...")
     APP_ID = "1598065258"
     COUNTRY = "cn"
     url = f"https://itunes.apple.com/{COUNTRY}/rss/customerreviews/id={APP_ID}/sortby=mostrecent/xml?limit=50"
-    print(f"苹果 RSS URL: {url}")
-    
     try:
         feed = feedparser.parse(url)
-        print(f"苹果 RSS 解析成功，共 {len(feed.entries)} 条条目")
-        
         cutoff = datetime.now() - timedelta(days=7)
         result = []
-        
         for entry in feed.entries:
             updated = entry.get("updated")
             if updated:
@@ -115,130 +127,121 @@ def get_apple_reviews():
                         if full_text:
                             result.append({
                                 "text": full_text,
-                                "rating": 3,  # RSS 不提供评分，默认3
-                                "sentiment": detect_sentiment(full_text)
+                                "rating": 3,
+                                "sentiment": detect_sentiment(full_text),
+                                "phrases": extract_key_phrases(full_text)
                             })
-                            print(f"  ✓ 收录: {full_text[:50]}...")
-                except Exception as e:
-                    print(f"  时间解析失败: {e}")
+                except:
                     continue
-        
-        print(f"苹果本周评论: {len(result)} 条")
         return result
     except Exception as e:
-        print(f"❌ 获取苹果评论失败: {e}")
+        print(f"获取苹果评论失败: {e}")
         return []
 
-def analyze_issues(reviews):
-    issue_keywords = {
-        'bug/crash': ['bug', 'crash', 'freeze', 'not working', 'error', 'broken', 'glitch'],
-        'UI/UX': ['confusing', 'hard to use', 'navigation', 'design', 'layout', 'interface', 'cluttered'],
-        'feature request': ['add', 'want', 'need', 'missing', 'feature', 'option', 'support'],
-        'performance': ['slow', 'lag', 'delay', 'loading', 'speed', 'performance'],
-        'login/account': ['login', 'sign in', 'account', 'password', 'register'],
-        'data sync': ['sync', 'lost', 'save', 'data', 'backup', 'progress'],
-    }
-    issue_counts = {k: 0 for k in issue_keywords}
-    for review in reviews:
-        text_lower = review['text'].lower()
-        for issue, keywords in issue_keywords.items():
-            for kw in keywords:
-                if kw in text_lower:
-                    issue_counts[issue] += 1
-                    break
-    return issue_counts
-
-def generate_ai_summary(google_reviews, apple_reviews):
+def generate_detailed_summary(google_reviews, apple_reviews):
     if not GROQ_API_KEY:
-        return "无 AI 摘要（缺少 API Key）"
+        return "无 AI 摘要"
     
     total = len(google_reviews) + len(apple_reviews)
     google_avg = sum(r['rating'] for r in google_reviews) / len(google_reviews) if google_reviews else 0
     apple_avg = sum(r['rating'] for r in apple_reviews) / len(apple_reviews) if apple_reviews else 0
     
-    sample_comments = []
-    for r in (google_reviews + apple_reviews)[:3]:
-        if r['text']:
-            sample_comments.append(f"- {r['text'][:100]}...")
-    samples_text = "\n".join(sample_comments) if sample_comments else "无"
+    # 收集典型评论
+    high_rating_comments = [r['text'][:150] for r in google_reviews if r['rating'] >= 4][:2]
+    low_rating_comments = [r['text'][:150] for r in google_reviews if r['rating'] <= 2][:3]
     
-    prompt = f"""分析本周应用评论，写一段简短的中文总结（2-3句话）：
+    prompt = f"""分析本周应用评论，写一段详细的中文总结（4-5句话，包含具体建议）：
 
 数据：
 - 总评论数: {total}
 - Google Play 平均评分: {google_avg:.1f} 星 ({len(google_reviews)} 条)
 - App Store 平均评分: {apple_avg:.1f} 星 ({len(apple_reviews)} 条)
 
-用户评论示例：
-{samples_text}
+高评分评论示例：
+{chr(10).join(['- ' + c for c in high_rating_comments]) if high_rating_comments else '无'}
 
-请写一段专业、简洁的总结，指出主要趋势或问题。"""
+低评分评论示例：
+{chr(10).join(['- ' + c for c in low_rating_comments]) if low_rating_comments else '无'}
+
+请总结：
+1. 用户主要满意/不满意什么
+2. 最 urgent 需要修复的问题
+3. 产品改进建议"""
     
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
     data = {
         "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 200,
+        "max_tokens": 300,
         "temperature": 0.7
     }
-    
     try:
         resp = requests.post(url, headers=headers, json=data, timeout=20)
         if resp.status_code == 200:
             return resp.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print(f"AI 总结失败: {e}")
-    
     return f"本周共收到 {total} 条评论，谷歌平均评分 {google_avg:.1f} 星，苹果平均评分 {apple_avg:.1f} 星。"
 
 def send_report_to_dingtalk(report):
     if not WEBHOOK_URL:
-        print("❌ 无 Webhook URL")
         return
+    # 签名处理
+    if DINGTALK_SECRET:
+        timestamp = str(round(time.time() * 1000))
+        sign = base64.b64encode(hmac.new(DINGTALK_SECRET.encode('utf-8'), f"{timestamp}\n{DINGTALK_SECRET}".encode('utf-8'), hashlib.sha256).digest()).decode('utf-8')
+        webhook_url = f"{WEBHOOK_URL}&timestamp={timestamp}&sign={urllib.parse.quote(sign)}"
+    else:
+        webhook_url = WEBHOOK_URL
     data = {"msgtype": "markdown", "markdown": {"title": "📊 双平台周报", "text": report}}
     try:
-        resp = requests.post(WEBHOOK_URL, json=data, timeout=10)
-        print(f"钉钉响应: {resp.status_code} - {resp.text}")
-        if resp.status_code == 200:
-            print("✅ 报告推送成功")
-        else:
-            print(f"❌ 推送失败: {resp.text}")
-    except Exception as e:
-        print(f"❌ 推送异常: {e}")
+        requests.post(webhook_url, json=data, timeout=10)
+    except:
+        pass
 
 def main():
-    print("\n" + "="*50)
-    
-    # 获取谷歌评论
+    print("="*50)
     google_reviews = get_google_reviews()
-    print(f"谷歌本周评论: {len(google_reviews)} 条")
-    
-    # 获取苹果评论
     apple_reviews = get_apple_reviews()
-    print(f"苹果本周评论: {len(apple_reviews)} 条")
     
     if len(google_reviews) == 0 and len(apple_reviews) == 0:
-        print("⚠️ 没有获取到任何评论数据，推送提示消息")
-        no_data_msg = "本周没有收到任何评论数据。\n\n请检查：\n1. 谷歌服务账号权限\n2. 苹果 RSS 源是否可访问\n3. 应用是否有新评论"
-        send_report_to_dingtalk({"msgtype": "text", "text": {"content": no_data_msg}})
+        send_report_to_dingtalk({"msgtype": "text", "text": {"content": "本周没有收到任何评论数据。"}})
         return
     
-    # 统计
+    # 详细统计
     google_ratings = Counter([r['rating'] for r in google_reviews])
     apple_ratings = Counter([r['rating'] for r in apple_reviews])
     google_sentiment = Counter([r['sentiment'] for r in google_reviews])
     apple_sentiment = Counter([r['sentiment'] for r in apple_reviews])
-    issue_analysis = analyze_issues(google_reviews)
-    summary = generate_ai_summary(google_reviews, apple_reviews)
     
-    # 构建报告
+    # 问题短语统计
+    all_phrases = []
+    for r in google_reviews + apple_reviews:
+        all_phrases.extend(r['phrases'])
+    phrase_counts = Counter(all_phrases)
+    
+    # 评分分布详情
+    rating_dist = []
+    for i in range(1, 6):
+        google_cnt = google_ratings.get(i, 0)
+        apple_cnt = apple_ratings.get(i, 0)
+        if google_cnt > 0 or apple_cnt > 0:
+            rating_dist.append(f"{i}⭐: G={google_cnt}, A={apple_cnt}")
+    
     google_avg = sum(r['rating'] for r in google_reviews) / len(google_reviews) if google_reviews else 0
     apple_avg = sum(r['rating'] for r in apple_reviews) / len(apple_reviews) if apple_reviews else 0
+    total = len(google_reviews) + len(apple_reviews)
     
+    # 趋势判断
+    trend = "📉 下降" if google_avg < 2.5 else "📈 良好" if google_avg >= 4 else "📊 平稳"
+    
+    summary = generate_detailed_summary(google_reviews, apple_reviews)
+    
+    # 构建详细报告
     report = f"""## 📊 双平台周报 ({datetime.now().strftime('%Y-%m-%d')})
 
----
+> {trend} | 本周共 **{total}** 条评论
 
 ### 📈 数据概览
 
@@ -247,29 +250,46 @@ def main():
 | **Google Play** | {len(google_reviews)} | {google_avg:.1f} ⭐ | {google_sentiment.get('positive', 0)} | {google_sentiment.get('negative', 0)} | {google_sentiment.get('neutral', 0)} |
 | **App Store** | {len(apple_reviews)} | {apple_avg:.1f} ⭐ | {apple_sentiment.get('positive', 0)} | {apple_sentiment.get('negative', 0)} | {apple_sentiment.get('neutral', 0)} |
 
----
+### 📊 评分分布
 
-### 🎯 问题归因（Google Play）
+| 星级 | Google Play | App Store |
+|------|-------------|-----------|
+"""
+    for i in range(1, 6):
+        report += f"| {i} ⭐ | {google_ratings.get(i, 0)} | {apple_ratings.get(i, 0)} |\n"
+    
+    report += f"""
+### 🎯 本周热点问题
 
 """
-    if any(issue_analysis.values()):
-        for issue, count in sorted(issue_analysis.items(), key=lambda x: x[1], reverse=True):
-            if count > 0:
-                bar = "█" * min(count, 10)
-                report += f"\n- **{issue}**: {count} 条 {bar}"
+    if phrase_counts:
+        for phrase, count in phrase_counts.most_common(5):
+            report += f"- **{phrase}**: 提及 {count} 次\n"
     else:
-        report += "\n暂无明确问题归类（评论较少或无关键词匹配）\n"
-
+        report += "无明确问题关键词\n"
+    
     report += f"""
+### 💬 用户原话精选
 
-### 🤖 AI 总结
+"""
+    # 低分评论
+    low_reviews = [r for r in google_reviews if r['rating'] <= 2][:2]
+    for r in low_reviews:
+        report += f"> 😞 {r['text'][:120]}...\n\n"
+    
+    # 高分评论
+    high_reviews = [r for r in google_reviews if r['rating'] >= 4][:1]
+    for r in high_reviews:
+        report += f"> 😊 {r['text'][:120]}...\n\n"
+    
+    report += f"""
+### 🤖 AI 深度分析
 
 {summary}
 
 ---
-
-*报告生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*"""
-
+*报告生成: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*
+"""
     send_report_to_dingtalk(report)
     print("报告生成完成")
 
