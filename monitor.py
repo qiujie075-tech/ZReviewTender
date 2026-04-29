@@ -39,17 +39,21 @@ def ai_generate_reply(text, rating):
         "Content-Type": "application/json"
     }
     
-    prompt = f"""You are a customer service assistant. Reply to this Google Play review.
-Rating: {rating} stars
-Review: "{text}"
+    prompt = f"""You are a customer service assistant for a fitness app. Reply to this Google Play review.
 
-Requirements:
-- Reply in the SAME language as the review
-- Be friendly, concise (under 200 characters)
-- If rating is low (1-2), apologize and offer help
-- If rating is high (4-5), thank the user
-- If rating is 3, acknowledge feedback and promise improvement
-- Do not mention AI, just reply as a human
+Review Rating: {rating} stars
+Review Text: "{text}"
+
+Your reply must follow these rules:
+1. Reply in the exact same language as the review (e.g., French → French)
+2. Keep your reply under 200 characters
+3. If the review mentions a specific problem (like "confusing homepage", "can't find button", "bug"), directly acknowledge that problem and offer a helpful suggestion or apologize for the confusion.
+4. Response style:
+   - Rating 4-5: Thank the user, and reassure them the app works well.
+   - Rating 3: Acknowledge feedback neutrally, promise to improve.
+   - Rating 1-2: Apologize for their poor experience, offer help, and ask for more details if needed.
+5. Do not mention AI or that you are a bot.
+6. Be friendly, helpful, and concise. Do not ask "how can we improve" unless no specific problem is mentioned.
 
 Your reply:"""
     
