@@ -2,7 +2,7 @@ name: Weekly Report
 
 on:
   schedule:
-    - cron: '0 9 * * 1'   # 每周一上午9点运行
+    - cron: '0 9 * * 1'
   workflow_dispatch:
 
 jobs:
