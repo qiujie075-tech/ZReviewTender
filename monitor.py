@@ -8,21 +8,22 @@ from googleapiclient.discovery import build
 SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
 PACKAGE_NAME = os.environ.get('PACKAGE_NAME')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
+GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 CACHE_FILE = "replied_ids.txt"
 
-print("=== 谷歌商店自动回复（基于本地记录文件）===")
+print("=== 谷歌商店自动回复（AI优化版）===")
 
-if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL]):
-    raise Exception("缺少必要的环境变量")
+if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL, GROQ_API_KEY]):
+    raise Exception("缺少必要的环境变量，请检查 Secrets")
 
-# ========== 读取已回复记录 ==========
+# 读取已回复记录
 replied_ids = set()
 if os.path.exists(CACHE_FILE):
     with open(CACHE_FILE, "r") as f:
         replied_ids = set(line.strip() for line in f if line.strip())
     print(f"已加载 {len(replied_ids)} 条历史回复记录")
 
-# ========== Google 认证 ==========
+# Google 认证
 creds_info = json.loads(SERVICE_ACCOUNT_JSON)
 credentials = service_account.Credentials.from_service_account_info(
     creds_info,
@@ -30,27 +31,60 @@ credentials = service_account.Credentials.from_service_account_info(
 )
 service = build("androidpublisher", "v3", credentials=credentials)
 
-# ========== 语言检测与回复模板 ==========
-def detect_language(text):
-    if any('\u4e00' <= ch <= '\u9fff' for ch in text):
-        return 'zh'
-    if any(ch in "éèêëàâäôöûüç" for ch in text.lower()):
-        return 'fr'
-    if any(ch in "äöüß" for ch in text.lower()):
-        return 'de'
-    return 'en'
-
-def get_reply(text):
-    lang = detect_language(text)
-    replies = {
-        'zh': "感谢您的反馈！我们会持续改进产品。",
-        'fr': "Merci pour votre retour ! Nous allons continuer à nous améliorer.",
-        'de': "Vielen Dank für Ihr Feedback! Wir werden uns weiter verbessern.",
-        'en': "Thank you for your feedback! We will continue to improve."
+def ai_generate_reply(text, rating):
+    """使用 Groq 免费 AI 生成个性化回复"""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
     }
-    return replies.get(lang, replies['en'])
+    
+    prompt = f"""You are a customer service assistant. Reply to this Google Play review.
+Rating: {rating} stars
+Review: "{text}"
 
-# ========== 获取所有评论（不过滤官方 replies） ==========
+Requirements:
+- Reply in the SAME language as the review
+- Be friendly, concise (under 200 characters)
+- If rating is low (1-2), apologize and offer help
+- If rating is high (4-5), thank the user
+- If rating is 3, acknowledge feedback and promise improvement
+- Do not mention AI, just reply as a human
+
+Your reply:"""
+    
+    data = {
+        "model": "llama-3.1-8b-instant",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 200,
+        "temperature": 0.7
+    }
+    
+    try:
+        resp = requests.post(url, headers=headers, json=data, timeout=20)
+        if resp.status_code != 200:
+            print(f"  AI 调用失败: {resp.status_code}")
+            return None
+        reply = resp.json()["choices"][0]["message"]["content"].strip()
+        return reply[:350] if reply else None
+    except Exception as e:
+        print(f"  AI 异常: {e}")
+        return None
+
+def get_reply(text, rating):
+    """先尝试 AI，失败则用固定模板"""
+    ai_reply = ai_generate_reply(text, rating)
+    if ai_reply:
+        return ai_reply
+    
+    # 降级固定模板
+    if rating >= 4:
+        return "Thank you for your support! We'll continue to improve."
+    elif rating == 3:
+        return "Thanks for your feedback! We'll work on making it better."
+    else:
+        return "Sorry for the inconvenience. We're working on fixing the issues. Please contact us for help."
+
 def get_all_reviews():
     try:
         response = service.reviews().list(packageName=PACKAGE_NAME, maxResults=100).execute()
@@ -62,24 +96,24 @@ def get_all_reviews():
             review_id = review.get("reviewId")
             if not review_id:
                 continue
-            # 获取评论文本
             comments = review.get("comments", [])
             if not comments:
                 continue
             user_comment = comments[0].get("userComment", {})
             text = user_comment.get("text", "")
+            star_rating = user_comment.get("starRating", 3)
             if not text:
                 continue
             result.append({
                 "id": review_id,
-                "text": text
+                "text": text,
+                "rating": star_rating
             })
         return result
     except Exception as e:
         print(f"获取评论失败: {e}")
         return []
 
-# ========== 发布回复 ==========
 def post_reply(review_id, reply_text):
     try:
         service.reviews().reply(
@@ -93,21 +127,18 @@ def post_reply(review_id, reply_text):
         print(f"  ❌ 回复失败: {review_id} - {e}")
         return False
 
-# ========== 发送通知 ==========
 def send_report(success, total, skipped):
     if WEBHOOK_URL:
-        data = {"msgtype": "text", "text": {"content": f"谷歌回复完成：成功 {success}/{total}，跳过 {skipped} 条已回复"}}
+        data = {"msgtype": "text", "text": {"content": f"谷歌回复完成：成功 {success}/{total}，跳过 {skipped} 条"}}
         try:
             requests.post(WEBHOOK_URL, json=data, timeout=10)
         except:
             pass
 
-# ========== 主程序 ==========
 print("获取所有评论...")
 all_reviews = get_all_reviews()
 print(f"共获取 {len(all_reviews)} 条评论")
 
-# 筛选未回复的（基于本地缓存，不依赖官方 replies）
 to_reply = []
 for review in all_reviews:
     if review["id"] in replied_ids:
@@ -120,20 +151,19 @@ new_ids = []
 for review in to_reply:
     rid = review["id"]
     text = review["text"]
-    print(f"\n处理 {rid}: {text[:80]}...")
-    reply = get_reply(text)
+    rating = review["rating"]
+    print(f"\n处理 {rid}: 评分 {rating}星 - {text[:80]}...")
+    reply = get_reply(text, rating)
     print(f"  回复: {reply}")
     if post_reply(rid, reply):
         success += 1
         new_ids.append(rid)
     time.sleep(2)
 
-# 更新缓存文件
 if new_ids:
     with open(CACHE_FILE, "a") as f:
         for rid in new_ids:
             f.write(rid + "\n")
-    replied_ids.update(new_ids)
     print(f"已更新缓存，新增 {len(new_ids)} 条记录")
 
 send_report(success, len(to_reply), len(all_reviews) - len(to_reply))
