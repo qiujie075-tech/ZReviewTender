@@ -8,28 +8,20 @@ from googleapiclient.discovery import build
 SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
 PACKAGE_NAME = os.environ.get('PACKAGE_NAME')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
-CACHE_FILE = "replied_ids.txt"
+REPLIED_IDS = os.environ.get('REPLIED_IDS', '')  # 从环境变量读取已回复的ID（逗号分隔）
 
-print("=== 谷歌商店自动回复（强制缓存版）===")
-print(f"PACKAGE_NAME: {PACKAGE_NAME}")
+print("=== 谷歌商店自动回复（Secrets缓存版）===")
 
 if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL]):
     raise Exception("缺少必要的环境变量")
 
-# ========== 读取缓存 ==========
-replied_ids = set()
-if os.path.exists(CACHE_FILE):
-    with open(CACHE_FILE, "r") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                replied_ids.add(line)
-    print(f"✅ 已加载缓存，共 {len(replied_ids)} 条记录")
-    print(f"缓存中的 ID: {list(replied_ids)[:5]}...")  # 打印前5条
-else:
-    print("⚠️ 缓存文件不存在，将创建新文件")
+# 解析已回复的ID
+replied_ids = set(REPLIED_IDS.split(',')) if REPLIED_IDS else set()
+print(f"已加载 {len(replied_ids)} 条历史回复记录")
+if replied_ids:
+    print(f"已回复的ID示例: {list(replied_ids)[:3]}")
 
-# ========== Google 认证 ==========
+# Google 认证
 creds_info = json.loads(SERVICE_ACCOUNT_JSON)
 credentials = service_account.Credentials.from_service_account_info(
     creds_info,
@@ -96,6 +88,8 @@ def post_reply(review_id, reply_text):
         return False
 
 def send_report(success, total, skipped):
+    # 输出特殊标记，供后续脚本更新 Secret
+    print(f"::set-output name=new_ids::{','.join(new_ids) if new_ids else ''}")
     if WEBHOOK_URL:
         data = {"msgtype": "text", "text": {"content": f"谷歌回复完成：成功 {success}/{total}，跳过 {skipped} 条"}}
         try:
@@ -103,16 +97,15 @@ def send_report(success, total, skipped):
         except:
             pass
 
-# ========== 主逻辑 ==========
+# 主逻辑
 print("获取所有评论...")
 all_reviews = get_all_reviews()
 print(f"共获取 {len(all_reviews)} 条评论")
 
-# 筛选未回复的（只根据本地缓存）
 to_reply = []
 for review in all_reviews:
     if review["id"] in replied_ids:
-        print(f"⏭️ 跳过(已在缓存): {review['id']}")
+        print(f"⏭️ 跳过(已在记录): {review['id']}")
         continue
     to_reply.append(review)
 print(f"需要回复: {len(to_reply)} 条")
@@ -123,7 +116,6 @@ if len(to_reply) == 0:
     print("执行完成")
     exit(0)
 
-success = 0
 new_ids = []
 for review in to_reply:
     rid = review["id"]
@@ -132,23 +124,13 @@ for review in to_reply:
     reply = get_reply(text)
     print(f"  回复: {reply}")
     if post_reply(rid, reply):
-        success += 1
         new_ids.append(rid)
     time.sleep(2)
 
-# 更新缓存文件
 if new_ids:
     print(f"新回复的 ID: {new_ids}")
-    with open(CACHE_FILE, "a") as f:
-        for rid in new_ids:
-            f.write(rid + "\n")
-    print(f"✅ 已更新缓存，新增 {len(new_ids)} 条记录")
+    send_report(len(new_ids), len(to_reply), len(all_reviews) - len(to_reply))
+else:
+    send_report(0, len(to_reply), len(all_reviews) - len(to_reply))
 
-# 打印最终缓存
-if os.path.exists(CACHE_FILE):
-    with open(CACHE_FILE, "r") as f:
-        final_cache = [line.strip() for line in f if line.strip()]
-    print(f"📦 最终缓存共 {len(final_cache)} 条: {final_cache}")
-
-send_report(success, len(to_reply), len(all_reviews) - len(to_reply))
 print("执行完成")
