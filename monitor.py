@@ -8,18 +8,21 @@ from googleapiclient.discovery import build
 SERVICE_ACCOUNT_JSON = os.environ.get('SERVICE_ACCOUNT_JSON')
 PACKAGE_NAME = os.environ.get('PACKAGE_NAME')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
-REPLIED_IDS = os.environ.get('REPLIED_IDS', '')  # 从环境变量读取已回复的ID（逗号分隔）
+CACHE_FILE = "replied_ids.txt"
 
-print("=== 谷歌商店自动回复（Secrets缓存版）===")
+print("=== 谷歌商店自动回复（固定模板版）===")
 
 if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL]):
     raise Exception("缺少必要的环境变量")
 
-# 解析已回复的ID
-replied_ids = set(REPLIED_IDS.split(',')) if REPLIED_IDS else set()
-print(f"已加载 {len(replied_ids)} 条历史回复记录")
-if replied_ids:
-    print(f"已回复的ID示例: {list(replied_ids)[:3]}")
+# 读取缓存
+replied_ids = set()
+if os.path.exists(CACHE_FILE):
+    with open(CACHE_FILE, "r") as f:
+        replied_ids = set(line.strip() for line in f if line.strip())
+    print(f"已加载 {len(replied_ids)} 条历史回复记录")
+else:
+    print("首次运行，创建缓存文件")
 
 # Google 认证
 creds_info = json.loads(SERVICE_ACCOUNT_JSON)
@@ -65,10 +68,7 @@ def get_all_reviews():
             text = user_comment.get("text", "")
             if not text:
                 continue
-            result.append({
-                "id": review_id,
-                "text": text
-            })
+            result.append({"id": review_id, "text": text})
         return result
     except Exception as e:
         print(f"获取评论失败: {e}")
@@ -88,8 +88,6 @@ def post_reply(review_id, reply_text):
         return False
 
 def send_report(success, total, skipped):
-    # 输出特殊标记，供后续脚本更新 Secret
-    print(f"::set-output name=new_ids::{','.join(new_ids) if new_ids else ''}")
     if WEBHOOK_URL:
         data = {"msgtype": "text", "text": {"content": f"谷歌回复完成：成功 {success}/{total}，跳过 {skipped} 条"}}
         try:
@@ -97,7 +95,6 @@ def send_report(success, total, skipped):
         except:
             pass
 
-# 主逻辑
 print("获取所有评论...")
 all_reviews = get_all_reviews()
 print(f"共获取 {len(all_reviews)} 条评论")
@@ -105,15 +102,15 @@ print(f"共获取 {len(all_reviews)} 条评论")
 to_reply = []
 for review in all_reviews:
     if review["id"] in replied_ids:
-        print(f"⏭️ 跳过(已在记录): {review['id']}")
+        print(f"⏭️ 跳过(已在缓存): {review['id']}")
         continue
     to_reply.append(review)
+
 print(f"需要回复: {len(to_reply)} 条")
 
 if len(to_reply) == 0:
-    print("没有新评论需要回复")
     send_report(0, 0, len(all_reviews))
-    print("执行完成")
+    print("没有新评论需要回复")
     exit(0)
 
 new_ids = []
@@ -125,12 +122,16 @@ for review in to_reply:
     print(f"  回复: {reply}")
     if post_reply(rid, reply):
         new_ids.append(rid)
+        replied_ids.add(rid)
     time.sleep(2)
 
+# 更新缓存文件
 if new_ids:
-    print(f"新回复的 ID: {new_ids}")
-    send_report(len(new_ids), len(to_reply), len(all_reviews) - len(to_reply))
-else:
-    send_report(0, len(to_reply), len(all_reviews) - len(to_reply))
+    with open(CACHE_FILE, "a") as f:
+        for rid in new_ids:
+            f.write(rid + "\n")
+    print(f"✅ 已更新缓存，新增 {len(new_ids)} 条记录")
+    print(f"当前缓存共有 {len(replied_ids)} 条记录")
 
+send_report(len(new_ids), len(to_reply), len(all_reviews) - len(to_reply))
 print("执行完成")
