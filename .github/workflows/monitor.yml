@@ -8,39 +8,34 @@ on:
 jobs:
   reply:
     runs-on: ubuntu-latest
-    outputs:
-      new_ids: ${{ steps.run.outputs.new_ids }}
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Restore replied IDs cache
+        uses: actions/cache@v3
+        id: cache-restore
+        with:
+          path: replied_ids.txt
+          key: replied-ids-cache
+          restore-keys: |
+            replied-ids-cache
+      
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      
       - run: pip install google-api-python-client google-auth requests
-      - name: Run monitor script
-        id: run
-        run: python monitor.py
+      
+      - run: python monitor.py
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
           PACKAGE_NAME: ${{ secrets.PACKAGE_NAME }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          REPLIED_IDS: ${{ secrets.REPLIED_IDS || '' }}
-
-  update-secret:
-    runs-on: ubuntu-latest
-    needs: reply
-    if: needs.reply.outputs.new_ids != ''
-    steps:
-      - name: Update REPLIED_IDS secret
-        uses: actions/github-script@v7
+      
+      - name: Save replied IDs cache
+        uses: actions/cache@v3
         with:
-          script: |
-            const currentIds = '${{ secrets.REPLIED_IDS || '' }}';
-            const newIds = '${{ needs.reply.outputs.new_ids }}';
-            const allIds = currentIds ? `${currentIds},${newIds}` : newIds;
-            await github.rest.actions.createOrUpdateRepoSecret({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              secret_name: 'REPLIED_IDS',
-              encrypted_value: allIds
-            });
-            console.log(`Updated REPLIED_IDS secret with ${newIds}`);
+          path: replied_ids.txt
+          key: replied-ids-cache-${{ github.run_id }}
+          restore-keys: |
+            replied-ids-cache
