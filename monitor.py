@@ -11,7 +11,7 @@ WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 CACHE_FILE = "replied_ids.txt"
 
-print("=== 谷歌商店自动回复（Groq AI增强版 - 强制语言匹配）===")
+print("=== 谷歌商店自动回复（Groq AI增强版 - 强制长度限制）===")
 
 if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL, GROQ_API_KEY]):
     raise Exception("缺少必要的环境变量")
@@ -32,44 +32,32 @@ credentials = service_account.Credentials.from_service_account_info(
 service = build("androidpublisher", "v3", credentials=credentials)
 
 def detect_language(text):
-    """检测文本语言，返回语言代码"""
-    # 中文字符范围
     if any('\u4e00' <= ch <= '\u9fff' for ch in text):
         return 'zh'
-    # 法语特殊字符
     if any(ch in "éèêëàâäôöûüç" for ch in text.lower()):
         return 'fr'
-    # 德语特殊字符
     if any(ch in "äöüß" for ch in text.lower()):
         return 'de'
-    # 日语（平假名/片假名范围）
     if any('\u3040' <= ch <= '\u30ff' for ch in text):
         return 'ja'
-    # 韩语
     if any('\uac00' <= ch <= '\ud7af' for ch in text):
         return 'ko'
-    # 默认英语
     return 'en'
 
 def ai_generate_reply(text, rating, lang):
-    """使用 Groq AI 生成指定语言的回复"""
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
     
-    # 语言名称映射
     lang_names = {
-        'zh': '中文',
-        'en': 'English',
-        'fr': 'French',
-        'de': 'German',
-        'ja': 'Japanese',
-        'ko': 'Korean'
+        'zh': '中文', 'en': 'English', 'fr': 'French',
+        'de': 'German', 'ja': 'Japanese', 'ko': 'Korean'
     }
     target_lang = lang_names.get(lang, 'English')
     
+    # 重要：在 prompt 中明确要求短回复
     prompt = f"""你是 PitPat 应用的官方客服。用户评价如下。你必须用 {target_lang} 回复，绝对不能使用其他语言。
 
 用户评分：{rating} 星
@@ -77,18 +65,18 @@ def ai_generate_reply(text, rating, lang):
 
 回复要求：
 1. 【最重要】你必须用 {target_lang} 回复，一个字都不能用其他语言
-2. 针对用户提出的具体问题逐一回应
-3. 如果用户提到隐私权限问题，说明我们重视隐私，可以关闭不必要的权限
-4. 如果用户提到功能问题，说明正在改进或提供帮助
-5. 保持诚恳、专业，不要使用套话
-6. 回复长度控制在 150 字以内
+2. 回复必须简短，**不超过 280 个字符**
+3. 针对用户的核心问题直接回应
+4. 如果用户提到隐私问题，说明可以在设置中关闭权限
+5. 保持诚恳、专业
+6. 不要使用套话如"我们已收到反馈"
 
-请用 {target_lang} 回复："""
+请用 {target_lang} 简短回复（280字符以内）："""
     
     data = {
         "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 300,
+        "max_tokens": 200,  # 限制 token 数，约为 150-200 字符
         "temperature": 0.7
     }
     
@@ -96,6 +84,9 @@ def ai_generate_reply(text, rating, lang):
         resp = requests.post(url, headers=headers, json=data, timeout=25)
         if resp.status_code == 200:
             reply = resp.json()["choices"][0]["message"]["content"].strip()
+            # 强制截断到 350 字符（Google Play 限制）
+            if len(reply) > 350:
+                reply = reply[:347] + "..."
             return reply
         else:
             print(f"AI 调用失败: {resp.status_code}")
@@ -105,22 +96,21 @@ def ai_generate_reply(text, rating, lang):
         return None
 
 def get_reply(text, rating):
-    """检测语言，调用 AI，失败时降级"""
     lang = detect_language(text)
     print(f"检测到语言: {lang}")
     
     ai_reply = ai_generate_reply(text, rating, lang)
-    if ai_reply:
+    if ai_reply and len(ai_reply) <= 350:
         return ai_reply
     
-    # 降级模板（按语言分类）
+    # 降级模板（确保长度符合要求）
     fallbacks = {
         'zh': "感谢您的反馈！我们会认真处理您提到的问题。",
-        'en': "Thank you for your feedback! We will carefully address the issues you mentioned.",
-        'fr': "Merci pour votre retour ! Nous traiterons sérieusement les problèmes que vous avez mentionnés.",
-        'de': "Vielen Dank für Ihr Feedback! Wir werden uns sorgfältig um die von Ihnen angesprochenen Probleme kümmern.",
-        'ja': "ご意見ありがとうございます。いただいた問題を真剣に検討いたします。",
-        'ko': "의견 주셔서 감사합니다. 말씀하신 문제를 진지하게 처리하겠습니다."
+        'en': "Thank you for your feedback! We will address your concerns.",
+        'fr': "Merci pour votre retour ! Nous allons traiter vos préoccupations.",
+        'de': "Danke für Ihr Feedback! Wir werden uns darum kümmern.",
+        'ja': "ご意見ありがとうございます。真剣に検討いたします。",
+        'ko': "의견 주셔서 감사합니다. 진지하게 처리하겠습니다."
     }
     return fallbacks.get(lang, fallbacks['en'])
 
@@ -149,6 +139,10 @@ def get_all_reviews():
         return []
 
 def post_reply(review_id, reply_text):
+    # 额外检查长度
+    if len(reply_text) > 350:
+        print(f"  ⚠️ 回复过长 ({len(reply_text)} 字符)，强制截断")
+        reply_text = reply_text[:347] + "..."
     try:
         service.reviews().reply(
             packageName=PACKAGE_NAME,
@@ -193,6 +187,7 @@ for review in to_reply:
     rating = review["rating"]
     print(f"\n处理 {rid}: 评分 {rating}星 - {text[:80]}...")
     reply = get_reply(text, rating)
+    print(f"  回复长度: {len(reply)} 字符")
     print(f"  回复: {reply}")
     if post_reply(rid, reply):
         new_ids.append(rid)
