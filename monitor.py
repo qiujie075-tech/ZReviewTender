@@ -11,7 +11,7 @@ WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 CACHE_FILE = "replied_ids.txt"
 
-print("=== 谷歌商店自动回复（Groq AI增强版 - 强制长度限制）===")
+print("=== 谷歌商店自动回复（350字符标准版）===")
 
 if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL, GROQ_API_KEY]):
     raise Exception("缺少必要的环境变量")
@@ -57,26 +57,23 @@ def ai_generate_reply(text, rating, lang):
     }
     target_lang = lang_names.get(lang, 'English')
     
-    # 重要：在 prompt 中明确要求短回复
-    prompt = f"""你是 PitPat 应用的官方客服。用户评价如下。你必须用 {target_lang} 回复，绝对不能使用其他语言。
+    prompt = f"""你是 PitPat 客服。用户评价如下。必须用 {target_lang} 回复。
 
-用户评分：{rating} 星
-用户评价："{text}"
+评分：{rating}/5
+评价："{text}"
 
 回复要求：
-1. 【最重要】你必须用 {target_lang} 回复，一个字都不能用其他语言
-2. 回复必须简短，**不超过 280 个字符**
-3. 针对用户的核心问题直接回应
-4. 如果用户提到隐私问题，说明可以在设置中关闭权限
-5. 保持诚恳、专业
-6. 不要使用套话如"我们已收到反馈"
+1. 必须用 {target_lang}，一个字都不能用其他语言
+2. 长度控制在 280-330 字符之间
+3. 针对用户的具体问题回应（如隐私、功能、体验等）
+4. 态度诚恳专业，不要用套话
 
-请用 {target_lang} 简短回复（280字符以内）："""
+请用 {target_lang} 回复："""
     
     data = {
         "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 200,  # 限制 token 数，约为 150-200 字符
+        "max_tokens": 220,
         "temperature": 0.7
     }
     
@@ -84,7 +81,7 @@ def ai_generate_reply(text, rating, lang):
         resp = requests.post(url, headers=headers, json=data, timeout=25)
         if resp.status_code == 200:
             reply = resp.json()["choices"][0]["message"]["content"].strip()
-            # 强制截断到 350 字符（Google Play 限制）
+            # 控制在 350 以内
             if len(reply) > 350:
                 reply = reply[:347] + "..."
             return reply
@@ -100,17 +97,23 @@ def get_reply(text, rating):
     print(f"检测到语言: {lang}")
     
     ai_reply = ai_generate_reply(text, rating, lang)
-    if ai_reply and len(ai_reply) <= 350:
+    if ai_reply and 200 <= len(ai_reply) <= 350:
         return ai_reply
+    elif ai_reply and len(ai_reply) < 200:
+        # 太短的话稍微补充一点
+        return ai_reply + " " + {
+            'zh': "感谢您的理解与支持！",
+            'en': "Thanks for your understanding and support!",
+            'fr': "Merci de votre compréhension et de votre soutien !",
+            'de': "Danke für Ihr Verständnis und Ihre Unterstützung!"
+        }.get(lang, "Thanks for your support!")
     
-    # 降级模板（确保长度符合要求）
+    # 降级模板（250字符左右）
     fallbacks = {
-        'zh': "感谢您的反馈！我们会认真处理您提到的问题。",
-        'en': "Thank you for your feedback! We will address your concerns.",
-        'fr': "Merci pour votre retour ! Nous allons traiter vos préoccupations.",
-        'de': "Danke für Ihr Feedback! Wir werden uns darum kümmern.",
-        'ja': "ご意見ありがとうございます。真剣に検討いたします。",
-        'ko': "의견 주셔서 감사합니다. 진지하게 처리하겠습니다."
+        'zh': "感谢您的反馈！我们会认真处理您提到的问题，并持续优化产品体验。如有更多建议，欢迎随时联系我们。",
+        'en': "Thank you for your feedback! We will carefully address the issues you mentioned and continue to improve the product experience. Please feel free to contact us with any further suggestions.",
+        'fr': "Merci pour votre retour ! Nous traiterons sérieusement les problèmes que vous avez mentionnés et continuerons à améliorer l'expérience produit. N'hésitez pas à nous contacter pour toute suggestion supplémentaire.",
+        'de': "Danke für Ihr Feedback! Wir werden uns sorgfältig um die von Ihnen angesprochenen Probleme kümmern und die Produkterfahrung weiter verbessern. Bitte zögern Sie nicht, uns bei weiteren Vorschlägen zu kontaktieren."
     }
     return fallbacks.get(lang, fallbacks['en'])
 
@@ -139,7 +142,7 @@ def get_all_reviews():
         return []
 
 def post_reply(review_id, reply_text):
-    # 额外检查长度
+    # 最终检查：确保不超过 350
     if len(reply_text) > 350:
         print(f"  ⚠️ 回复过长 ({len(reply_text)} 字符)，强制截断")
         reply_text = reply_text[:347] + "..."
