@@ -11,7 +11,7 @@ WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 CACHE_FILE = "replied_ids.txt"
 
-print("=== 谷歌商店自动回复（350字符标准版）===")
+print("=== 谷歌商店自动回复（长度严格控制版）===")
 
 if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL, GROQ_API_KEY]):
     raise Exception("缺少必要的环境变量")
@@ -38,10 +38,6 @@ def detect_language(text):
         return 'fr'
     if any(ch in "äöüß" for ch in text.lower()):
         return 'de'
-    if any('\u3040' <= ch <= '\u30ff' for ch in text):
-        return 'ja'
-    if any('\uac00' <= ch <= '\ud7af' for ch in text):
-        return 'ko'
     return 'en'
 
 def ai_generate_reply(text, rating, lang):
@@ -51,43 +47,32 @@ def ai_generate_reply(text, rating, lang):
         "Content-Type": "application/json"
     }
     
-    lang_names = {
-        'zh': '中文', 'en': 'English', 'fr': 'French',
-        'de': 'German', 'ja': 'Japanese', 'ko': 'Korean'
-    }
+    lang_names = {'zh': '中文', 'en': 'English', 'fr': 'French', 'de': 'German'}
     target_lang = lang_names.get(lang, 'English')
     
-    prompt = f"""你是 PitPat 客服。用户评价如下。必须用 {target_lang} 回复。
+    prompt = f"""Reply to this app review. MUST use {target_lang}. MAX 250 characters. Be helpful.
 
-评分：{rating}/5
-评价："{text}"
+Rating: {rating}/5
+Review: {text}
 
-回复要求：
-1. 必须用 {target_lang}，一个字都不能用其他语言
-2. 长度控制在 280-330 字符之间
-3. 针对用户的具体问题回应（如隐私、功能、体验等）
-4. 态度诚恳专业，不要用套话
-
-请用 {target_lang} 回复："""
+Reply (250 chars max, {target_lang} only):"""
     
     data = {
         "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 220,
+        "max_tokens": 150,  # 约 200-250 字符
         "temperature": 0.7
     }
     
     try:
-        resp = requests.post(url, headers=headers, json=data, timeout=25)
+        resp = requests.post(url, headers=headers, json=data, timeout=20)
         if resp.status_code == 200:
             reply = resp.json()["choices"][0]["message"]["content"].strip()
-            # 控制在 350 以内
-            if len(reply) > 350:
-                reply = reply[:347] + "..."
+            # 强制截断到 300
+            if len(reply) > 300:
+                reply = reply[:297] + "..."
             return reply
-        else:
-            print(f"AI 调用失败: {resp.status_code}")
-            return None
+        return None
     except Exception as e:
         print(f"AI 异常: {e}")
         return None
@@ -97,23 +82,18 @@ def get_reply(text, rating):
     print(f"检测到语言: {lang}")
     
     ai_reply = ai_generate_reply(text, rating, lang)
-    if ai_reply and 200 <= len(ai_reply) <= 350:
+    if ai_reply:
+        # 确保不超过 300
+        if len(ai_reply) > 300:
+            ai_reply = ai_reply[:297] + "..."
         return ai_reply
-    elif ai_reply and len(ai_reply) < 200:
-        # 太短的话稍微补充一点
-        return ai_reply + " " + {
-            'zh': "感谢您的理解与支持！",
-            'en': "Thanks for your understanding and support!",
-            'fr': "Merci de votre compréhension et de votre soutien !",
-            'de': "Danke für Ihr Verständnis und Ihre Unterstützung!"
-        }.get(lang, "Thanks for your support!")
     
     # 降级模板（250字符左右）
     fallbacks = {
-        'zh': "感谢您的反馈！我们会认真处理您提到的问题，并持续优化产品体验。如有更多建议，欢迎随时联系我们。",
-        'en': "Thank you for your feedback! We will carefully address the issues you mentioned and continue to improve the product experience. Please feel free to contact us with any further suggestions.",
-        'fr': "Merci pour votre retour ! Nous traiterons sérieusement les problèmes que vous avez mentionnés et continuerons à améliorer l'expérience produit. N'hésitez pas à nous contacter pour toute suggestion supplémentaire.",
-        'de': "Danke für Ihr Feedback! Wir werden uns sorgfältig um die von Ihnen angesprochenen Probleme kümmern und die Produkterfahrung weiter verbessern. Bitte zögern Sie nicht, uns bei weiteren Vorschlägen zu kontaktieren."
+        'zh': "感谢您的反馈！我们会认真处理您提到的问题，并持续优化产品体验。",
+        'en': "Thank you for your feedback! We will address your concerns and continue to improve.",
+        'fr': "Merci pour votre retour ! Nous allons traiter vos préoccupations et continuer à nous améliorer.",
+        'de': "Danke für Ihr Feedback! Wir werden uns um Ihre Anliegen kümmern und uns weiter verbessern."
     }
     return fallbacks.get(lang, fallbacks['en'])
 
@@ -142,10 +122,10 @@ def get_all_reviews():
         return []
 
 def post_reply(review_id, reply_text):
-    # 最终检查：确保不超过 350
+    # 最终检查
     if len(reply_text) > 350:
-        print(f"  ⚠️ 回复过长 ({len(reply_text)} 字符)，强制截断")
         reply_text = reply_text[:347] + "..."
+        print(f"  ⚠️ 截断到 350 字符")
     try:
         service.reviews().reply(
             packageName=PACKAGE_NAME,
@@ -188,10 +168,9 @@ for review in to_reply:
     rid = review["id"]
     text = review["text"]
     rating = review["rating"]
-    print(f"\n处理 {rid}: 评分 {rating}星 - {text[:80]}...")
+    print(f"\n处理 {rid}: 评分 {rating}星 - {text[:60]}...")
     reply = get_reply(text, rating)
-    print(f"  回复长度: {len(reply)} 字符")
-    print(f"  回复: {reply}")
+    print(f"  回复 ({len(reply)}字): {reply}")
     if post_reply(rid, reply):
         new_ids.append(rid)
     time.sleep(2)
