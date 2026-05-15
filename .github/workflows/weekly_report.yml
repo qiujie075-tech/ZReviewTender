@@ -2,7 +2,7 @@ name: Weekly Report
 
 on:
   schedule:
-    - cron: '0 9 * * 1'
+    - cron: '0 23 * * 0'   # 北京时间周一早上7点（UTC时间周日23点）
   workflow_dispatch:
 
 jobs:
