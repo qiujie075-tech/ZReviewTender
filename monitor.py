@@ -11,17 +11,19 @@ WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 CACHE_FILE = "replied_ids.txt"
 
-print("=== 谷歌商店自动回复（长度严格控制版）===")
+print("=== 谷歌商店自动回复（Git 缓存版）===")
 
 if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL, GROQ_API_KEY]):
     raise Exception("缺少必要的环境变量")
 
-# 读取缓存
+# 读取缓存（直接从仓库中的文件）
 replied_ids = set()
 if os.path.exists(CACHE_FILE):
     with open(CACHE_FILE, "r") as f:
         replied_ids = set(line.strip() for line in f if line.strip())
     print(f"已加载 {len(replied_ids)} 条历史回复记录")
+else:
+    print("首次运行，创建新缓存文件")
 
 # Google 认证
 creds_info = json.loads(SERVICE_ACCOUNT_JSON)
@@ -32,12 +34,16 @@ credentials = service_account.Credentials.from_service_account_info(
 service = build("androidpublisher", "v3", credentials=credentials)
 
 def detect_language(text):
+    """优先检测德语（äöüß），再检测法语（éèê等），然后中文等"""
+    text_lower = text.lower()
+    # 德语特有字符（注意：äöü也出现在法语中，但ß是德语独有）
+    if 'ß' in text_lower or any(ch in "äöü" for ch in text_lower):
+        # 进一步排除法语：如果同时有大量 éè 等，仍判德语，因为德语也有少量外来词
+        return 'de'
+    if any(ch in "éèêëàâäôöûüç" for ch in text_lower):
+        return 'fr'
     if any('\u4e00' <= ch <= '\u9fff' for ch in text):
         return 'zh'
-    if any(ch in "éèêëàâäôöûüç" for ch in text.lower()):
-        return 'fr'
-    if any(ch in "äöüß" for ch in text.lower()):
-        return 'de'
     return 'en'
 
 def ai_generate_reply(text, rating, lang):
@@ -50,27 +56,36 @@ def ai_generate_reply(text, rating, lang):
     lang_names = {'zh': '中文', 'en': 'English', 'fr': 'French', 'de': 'German'}
     target_lang = lang_names.get(lang, 'English')
     
-    prompt = f"""Reply to this app review. MUST use {target_lang}. MAX 250 characters. Be helpful.
+    prompt = f"""你是 PitPat 客服。用户评价是 {target_lang}。你必须用 {target_lang} 回复，严禁使用其他任何语言。
 
-Rating: {rating}/5
-Review: {text}
+评分：{rating}/5
+评价："{text}"
 
-Reply (250 chars max, {target_lang} only):"""
+回复要求：
+1. 只使用 {target_lang}
+2. 针对用户的具体问题回应
+3. 长度 200-300 字符
+4. 诚恳、简洁
+
+请用 {target_lang} 回复："""
     
     data = {
         "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 150,  # 约 200-250 字符
+        "max_tokens": 200,
         "temperature": 0.7
     }
     
     try:
-        resp = requests.post(url, headers=headers, json=data, timeout=20)
+        resp = requests.post(url, headers=headers, json=data, timeout=25)
         if resp.status_code == 200:
             reply = resp.json()["choices"][0]["message"]["content"].strip()
-            # 强制截断到 300
-            if len(reply) > 300:
-                reply = reply[:297] + "..."
+            # 后处理：如果目标语言是德语但回复中含有法语字符，强制修正
+            if lang == 'de' and any(ch in "éèêëàâô" for ch in reply):
+                print("  ⚠️ AI 回复混入法语，使用德语模板")
+                return "Vielen Dank für Ihr Feedback! Wir werden uns um Ihre Anliegen kümmern."
+            if len(reply) > 350:
+                reply = reply[:347] + "..."
             return reply
         return None
     except Exception as e:
@@ -83,17 +98,13 @@ def get_reply(text, rating):
     
     ai_reply = ai_generate_reply(text, rating, lang)
     if ai_reply:
-        # 确保不超过 300
-        if len(ai_reply) > 300:
-            ai_reply = ai_reply[:297] + "..."
         return ai_reply
     
-    # 降级模板（250字符左右）
     fallbacks = {
         'zh': "感谢您的反馈！我们会认真处理您提到的问题，并持续优化产品体验。",
         'en': "Thank you for your feedback! We will address your concerns and continue to improve.",
         'fr': "Merci pour votre retour ! Nous allons traiter vos préoccupations et continuer à nous améliorer.",
-        'de': "Danke für Ihr Feedback! Wir werden uns um Ihre Anliegen kümmern und uns weiter verbessern."
+        'de': "Vielen Dank für Ihr Feedback! Wir werden uns um Ihre Anliegen kümmern und uns weiter verbessern."
     }
     return fallbacks.get(lang, fallbacks['en'])
 
@@ -122,10 +133,8 @@ def get_all_reviews():
         return []
 
 def post_reply(review_id, reply_text):
-    # 最终检查
     if len(reply_text) > 350:
         reply_text = reply_text[:347] + "..."
-        print(f"  ⚠️ 截断到 350 字符")
     try:
         service.reviews().reply(
             packageName=PACKAGE_NAME,
@@ -168,7 +177,7 @@ for review in to_reply:
     rid = review["id"]
     text = review["text"]
     rating = review["rating"]
-    print(f"\n处理 {rid}: 评分 {rating}星 - {text[:60]}...")
+    print(f"\n处理 {rid}: 评分 {rating}星 - {text[:80]}...")
     reply = get_reply(text, rating)
     print(f"  回复 ({len(reply)}字): {reply}")
     if post_reply(rid, reply):
@@ -176,6 +185,7 @@ for review in to_reply:
     time.sleep(2)
 
 if new_ids:
+    # 追加到缓存文件
     with open(CACHE_FILE, "a") as f:
         for rid in new_ids:
             f.write(rid + "\n")
