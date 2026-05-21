@@ -8,35 +8,31 @@ on:
 jobs:
   reply:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 允许推送代码
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Restore replied IDs cache
-        uses: actions/cache@v3
-        id: cache-restore
         with:
-          path: replied_ids.txt
-          key: replied-ids-cache
-          restore-keys: |
-            replied-ids-cache
-      
+          token: ${{ secrets.GITHUB_TOKEN }}
+          
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+          
       - run: pip install google-api-python-client google-auth requests
       
-      - run: python monitor.py
+      - name: Run monitor script
+        run: python monitor.py
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
           PACKAGE_NAME: ${{ secrets.PACKAGE_NAME }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       
-      - name: Save replied IDs cache
-        uses: actions/cache@v3
-        with:
-          path: replied_ids.txt
-          key: replied-ids-cache-${{ github.run_id }}
-          restore-keys: |
-            replied-ids-cache
+      - name: Commit and push replied IDs cache
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add replied_ids.txt
+          git diff --staged --quiet || git commit -m "Update replied IDs cache"
+          git push
