@@ -11,12 +11,12 @@ WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 GROQ_API_KEY = os.environ.get('GROQ_API_KEY')
 CACHE_FILE = "replied_ids.txt"
 
-print("=== 谷歌商店自动回复（Git 缓存版）===")
+print("=== 谷歌商店自动回复（长度优化+针对性回复版）===")
 
 if not all([SERVICE_ACCOUNT_JSON, PACKAGE_NAME, WEBHOOK_URL, GROQ_API_KEY]):
     raise Exception("缺少必要的环境变量")
 
-# 读取缓存（直接从仓库中的文件）
+# 读取缓存（不做任何改动）
 replied_ids = set()
 if os.path.exists(CACHE_FILE):
     with open(CACHE_FILE, "r") as f:
@@ -36,9 +36,7 @@ service = build("androidpublisher", "v3", credentials=credentials)
 def detect_language(text):
     """优先检测德语（äöüß），再检测法语（éèê等），然后中文等"""
     text_lower = text.lower()
-    # 德语特有字符（注意：äöü也出现在法语中，但ß是德语独有）
     if 'ß' in text_lower or any(ch in "äöü" for ch in text_lower):
-        # 进一步排除法语：如果同时有大量 éè 等，仍判德语，因为德语也有少量外来词
         return 'de'
     if any(ch in "éèêëàâäôöûüç" for ch in text_lower):
         return 'fr'
@@ -56,23 +54,18 @@ def ai_generate_reply(text, rating, lang):
     lang_names = {'zh': '中文', 'en': 'English', 'fr': 'French', 'de': 'German'}
     target_lang = lang_names.get(lang, 'English')
     
-    prompt = f"""你是 PitPat 客服。用户评价是 {target_lang}。你必须用 {target_lang} 回复，严禁使用其他任何语言。
+    # 极简 prompt，强调长度和针对性
+    prompt = f"""You are PitPat support. User review in {target_lang}. Reply in {target_lang} only. MAX 280 characters. Address the specific complaint directly.
 
-评分：{rating}/5
-评价："{text}"
+Rating: {rating}/5
+Review: "{text}"
 
-回复要求：
-1. 只使用 {target_lang}
-2. 针对用户的具体问题回应
-3. 长度 200-300 字符
-4. 诚恳、简洁
-
-请用 {target_lang} 回复："""
+Reply (short, specific, {target_lang}):"""
     
     data = {
         "model": "llama-3.1-8b-instant",
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 200,
+        "max_tokens": 160,          # 控制长度约 220-280 字符
         "temperature": 0.7
     }
     
@@ -80,12 +73,12 @@ def ai_generate_reply(text, rating, lang):
         resp = requests.post(url, headers=headers, json=data, timeout=25)
         if resp.status_code == 200:
             reply = resp.json()["choices"][0]["message"]["content"].strip()
-            # 后处理：如果目标语言是德语但回复中含有法语字符，强制修正
+            # 强制截断到 340 字符（留一点余量）
+            if len(reply) > 340:
+                reply = reply[:337] + "..."
+            # 二次检查：如果目标是德语但回复混入法语，强制替换
             if lang == 'de' and any(ch in "éèêëàâô" for ch in reply):
-                print("  ⚠️ AI 回复混入法语，使用德语模板")
                 return "Vielen Dank für Ihr Feedback! Wir werden uns um Ihre Anliegen kümmern."
-            if len(reply) > 350:
-                reply = reply[:347] + "..."
             return reply
         return None
     except Exception as e:
@@ -98,13 +91,17 @@ def get_reply(text, rating):
     
     ai_reply = ai_generate_reply(text, rating, lang)
     if ai_reply:
+        # 再次确保不超过 350
+        if len(ai_reply) > 350:
+            ai_reply = ai_reply[:347] + "..."
         return ai_reply
     
+    # 降级模板（简短）
     fallbacks = {
-        'zh': "感谢您的反馈！我们会认真处理您提到的问题，并持续优化产品体验。",
-        'en': "Thank you for your feedback! We will address your concerns and continue to improve.",
-        'fr': "Merci pour votre retour ! Nous allons traiter vos préoccupations et continuer à nous améliorer.",
-        'de': "Vielen Dank für Ihr Feedback! Wir werden uns um Ihre Anliegen kümmern und uns weiter verbessern."
+        'zh': "感谢反馈！我们会针对性优化您提到的问题。",
+        'en': "Thanks for your feedback! We'll address the issues you raised.",
+        'fr': "Merci pour votre retour ! Nous traiterons vos préoccupations.",
+        'de': "Danke für Ihr Feedback! Wir werden uns um Ihre Anliegen kümmern."
     }
     return fallbacks.get(lang, fallbacks['en'])
 
@@ -133,8 +130,10 @@ def get_all_reviews():
         return []
 
 def post_reply(review_id, reply_text):
+    # 最终长度安全锁
     if len(reply_text) > 350:
         reply_text = reply_text[:347] + "..."
+        print(f"  ⚠️ 强制截断到 350 字符")
     try:
         service.reviews().reply(
             packageName=PACKAGE_NAME,
@@ -185,7 +184,6 @@ for review in to_reply:
     time.sleep(2)
 
 if new_ids:
-    # 追加到缓存文件
     with open(CACHE_FILE, "a") as f:
         for rid in new_ids:
             f.write(rid + "\n")
