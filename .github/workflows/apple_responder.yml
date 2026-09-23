@@ -2,26 +2,27 @@ name: Apple App Store Auto Reply
 
 on:
   schedule:
-    - cron: '0 */3 * * *'
+    - cron: "0 */3 * * *"
   workflow_dispatch:
 
 jobs:
   reply:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - name: Restore replied IDs cache
-        uses: actions/cache@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          path: apple_replied_ids.txt
-          key: apple-replied-ids-cache
-          restore-keys: |
-            apple-replied-ids-cache
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: pip install requests pyjwt cryptography
-      - run: python apple_responder.py
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests pyjwt cryptography
+
+      - name: Run Apple App Store Auto Reply
+        run: python apple_responder.py
         env:
           APPLE_PRIVATE_KEY: ${{ secrets.APPLE_PRIVATE_KEY }}
           APPLE_KEY_ID: ${{ secrets.APPLE_KEY_ID }}
