@@ -10,11 +10,11 @@ PACKAGE_NAME = os.environ.get("PACKAGE_NAME")
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 
-print("=== Google Play 自动回复 ===")
-print("规则：只回复当前没有开发者回复的评价，已有回复永不覆盖")
+print("=== Google Play Auto Reply ===")
+print("Rule: Only reply to reviews without an existing developer reply.")
 
 # =========================
-# 检查环境变量
+# Check environment variables
 # =========================
 
 required_envs = {
@@ -26,11 +26,11 @@ required_envs = {
 missing = [name for name, value in required_envs.items() if not value]
 
 if missing:
-    raise Exception(f"缺少必要环境变量: {', '.join(missing)}")
+    raise Exception(f"Missing environment variables: {', '.join(missing)}")
 
 
 # =========================
-# Google Play API 认证
+# Google Play authentication
 # =========================
 
 creds_info = json.loads(SERVICE_ACCOUNT_JSON)
@@ -48,14 +48,10 @@ service = build(
 
 
 # =========================
-# AI 生成针对性回复
+# Generate targeted AI reply
 # =========================
 
 def ai_generate_reply(review_text, rating):
-    """
-    根据用户评价内容生成针对性回复。
-    自动识别评价语言，并使用相同语言回复。
-    """
 
     url = "https://api.groq.com/openai/v1/chat/completions"
 
@@ -67,58 +63,47 @@ def ai_generate_reply(review_text, rating):
     prompt = f"""
 You are the official customer support representative for PitPat.
 
-Write a short, natural and specific response to the user's Google Play review.
+Write a short, natural and specific response to this Google Play review.
 
-User rating:
-{rating}/5
-
-User review:
-"{review_text}"
+Rating: {rating}/5
+Review: "{review_text}"
 
 Requirements:
 
 1. Reply in the SAME LANGUAGE as the user's review.
 
-2. Read the review carefully and respond to the SPECIFIC issue, experience,
-   compliment, complaint, or suggestion mentioned by the user.
+2. Read the review carefully and respond specifically to what the user said.
 
-3. Do NOT use generic responses such as:
-   "Thanks for your feedback. We'll address the issue."
-   The response must clearly relate to what the user actually wrote.
+3. Do NOT give a generic response such as:
+   "Thanks for your feedback. We'll address the issues you raised."
 
-4. If the user reports a bug or technical problem:
-   - acknowledge the specific problem;
-   - apologize briefly when appropriate;
-   - tell them the team will investigate or improve it.
-   Do not claim the problem has already been fixed unless that is known.
+4. If the user reports a bug or technical issue:
+   acknowledge the specific issue and briefly apologize when appropriate.
 
-5. If the user reports problems involving login, connection, treadmill,
-   device pairing, Band, workout tracking, subscription, payment,
-   account, update, or other PitPat functions:
-   explicitly mention the relevant issue in the response.
+5. If the review mentions login, connection, treadmill, device pairing,
+   PitPat Band, workout tracking, subscription, payment, account,
+   advertising, update, or another specific function, mention that
+   specific issue naturally.
 
-6. If the review is positive:
-   thank the user naturally and respond to the specific feature or
-   experience they liked.
+6. If the review is positive, thank the user and respond specifically
+   to the feature or experience they liked.
 
-7. If the review contains several issues:
-   acknowledge the most important issue(s) instead of giving a generic answer.
+7. If several problems are mentioned, acknowledge the main problems.
 
-8. Never invent troubleshooting steps, refunds, compensation,
-   product features, policies, or promises.
+8. Do NOT invent fixes, refunds, compensation, policies or features.
 
-9. Keep the tone friendly, professional and human.
+9. Do NOT claim an issue has already been fixed unless the review
+   itself clearly indicates that.
 
-10. Do not sound robotic or overly formal.
+10. Do NOT ask the user to change their rating.
 
-11. Do not ask the user to change their rating.
+11. Do NOT mention AI or automated replies.
 
-12. Do not mention AI or automated replies.
+12. Keep the tone friendly, professional and human.
 
-13. Keep the response concise.
-    Maximum 320 characters.
+13. Maximum 320 characters.
 
-Return ONLY the final response.
+Return ONLY the final reply.
 """
 
     data = {
@@ -134,6 +119,7 @@ Return ONLY the final response.
     }
 
     try:
+
         response = requests.post(
             url,
             headers=headers,
@@ -143,8 +129,7 @@ Return ONLY the final response.
 
         if response.status_code != 200:
             print(
-                f"  ❌ Groq API 调用失败 "
-                f"HTTP {response.status_code}: "
+                f"AI request failed: HTTP {response.status_code} "
                 f"{response.text[:500]}"
             )
             return None
@@ -160,32 +145,31 @@ Return ONLY the final response.
         )
 
         if not reply:
-            print("  ❌ AI 返回空内容")
+            print("AI returned empty reply.")
             return None
 
-        # 去掉模型偶尔生成的多余引号
         reply = reply.strip('"').strip("'").strip()
 
-        # 长度保护
         if len(reply) > 320:
             reply = reply[:317].rstrip() + "..."
 
         return reply
 
     except Exception as e:
-        print(f"  ❌ AI 请求异常: {e}")
+        print(f"AI error: {e}")
         return None
 
 
 # =========================
-# 获取 Google Play 评价
+# Get Google Play reviews
 # =========================
 
 def get_all_reviews():
 
-    reviews_result = []
+    results = []
 
     try:
+
         request = service.reviews().list(
             packageName=PACKAGE_NAME,
             maxResults=100
@@ -209,8 +193,7 @@ def get_all_reviews():
                 user_comment = None
                 developer_comment = None
 
-                # 不能假设 comments[0] 一定是 userComment
-                # 遍历所有 comment，分别寻找用户评价和开发者回复
+                # Find both user review and developer reply
                 for comment in comments:
 
                     if "userComment" in comment:
@@ -228,15 +211,15 @@ def get_all_reviews():
                 if not review_text:
                     continue
 
-                # 只要存在 developerComment，
-                # 无论是 AI 回复还是人工修改过的回复，
-                # 后续自动化都绝不再碰。
+                # IMPORTANT:
+                # If ANY developer reply already exists,
+                # this automation will NEVER modify it.
                 has_developer_reply = bool(
                     developer_comment
                     and developer_comment.get("text", "").strip()
                 )
 
-                reviews_result.append({
+                results.append({
                     "id": review_id,
                     "text": review_text,
                     "rating": star_rating,
@@ -248,28 +231,18 @@ def get_all_reviews():
                 previous_response=response
             )
 
-        print(f"API 共读取 {len(reviews_result)} 条有效评价")
-
-        return reviews_result
+        return results
 
     except Exception as e:
-
-        print(f"❌ 获取 Google Play 评价失败: {e}")
-
+        print(f"Failed to get reviews: {e}")
         return []
 
 
 # =========================
-# 提交回复
+# Post reply
 # =========================
 
 def post_reply(review_id, reply_text):
-
-    if not reply_text:
-        return False
-
-    if len(reply_text) > 320:
-        reply_text = reply_text[:317].rstrip() + "..."
 
     try:
 
@@ -281,22 +254,19 @@ def post_reply(review_id, reply_text):
             }
         ).execute()
 
-        print(f"  ✅ 回复成功: {review_id}")
+        print(f"Reply successful: {review_id}")
 
         return True
 
     except Exception as e:
 
-        print(
-            f"  ❌ 回复提交失败: "
-            f"{review_id} - {e}"
-        )
+        print(f"Reply failed: {review_id} - {e}")
 
         return False
 
 
 # =========================
-# 钉钉/Webhook 报告
+# Send report
 # =========================
 
 def send_report(success, skipped, failed):
@@ -305,10 +275,10 @@ def send_report(success, skipped, failed):
         return
 
     content = (
-        "Google Play 自动回复完成\n"
-        f"新增回复：{success}\n"
-        f"已有回复跳过：{skipped}\n"
-        f"失败/待重试：{failed}"
+        "Google Play Auto Reply completed\n"
+        f"New replies: {success}\n"
+        f"Existing replies skipped: {skipped}\n"
+        f"Failed / waiting for retry: {failed}"
     )
 
     data = {
@@ -319,115 +289,92 @@ def send_report(success, skipped, failed):
     }
 
     try:
-
         requests.post(
             WEBHOOK_URL,
             json=data,
             timeout=10
         )
-
     except Exception as e:
-
-        print(f"Webhook 发送失败: {e}")
+        print(f"Webhook error: {e}")
 
 
 # =========================
-# 主程序
+# MAIN
 # =========================
 
-print("\n开始获取 Google Play 评价...")
+print("Getting Google Play reviews...")
 
-all_reviews = get_all_reviews()
+reviews = get_all_reviews()
 
-print(f"本次共检查 {len(all_reviews)} 条评价")
+print(f"Reviews checked: {len(reviews)}")
 
 success_count = 0
 skipped_count = 0
 failed_count = 0
 
-
-for review in all_reviews:
+for review in reviews:
 
     review_id = review["id"]
     review_text = review["text"]
     rating = review["rating"]
 
-    print("\n--------------------------------")
+    print("\n------------------------------")
+    print(f"Review ID: {review_id}")
+    print(f"Rating: {rating}")
+    print(f"Review: {review_text[:200]}")
 
-    print(
-        f"评价 {review_id}\n"
-        f"评分：{rating} 星\n"
-        f"内容：{review_text[:150]}"
-    )
-
-    # ==========================
-    # 最重要的保护逻辑
-    # ==========================
+    # ==========================================
+    # CORE RULE
+    # Existing reply = NEVER TOUCH IT
+    # ==========================================
 
     if review["has_developer_reply"]:
 
-        print("  ⏭ 已存在开发者回复，跳过，不做任何修改")
+        print("SKIP: Developer reply already exists.")
 
         skipped_count += 1
-
         continue
 
-    # ==========================
-    # 没有回复才调用 AI
-    # ==========================
+    # ==========================================
+    # No existing reply -> generate AI response
+    # ==========================================
 
-    print("  🤖 当前没有回复，开始根据评价内容生成回复")
+    print("No existing reply. Generating targeted response...")
 
     reply = ai_generate_reply(
         review_text,
         rating
     )
 
-    # AI 失败：
-    # 不使用模板，不提交任何内容。
-    # 等下一次 GitHub Actions 再尝试。
+    # AI failed -> do nothing
+    # It will retry during the next scheduled run.
     if not reply:
 
-        print("  ⚠️ AI 未生成有效回复，本次不回复")
+        print("AI generation failed. No reply posted.")
 
         failed_count += 1
-
         continue
 
-    print(
-        f"  💬 AI 回复 ({len(reply)}字符): "
-        f"{reply}"
-    )
-
-    # ==========================
-    # 提交 Google Play
-    # ==========================
+    print(f"Generated reply: {reply}")
 
     if post_reply(
         review_id,
         reply
     ):
-
         success_count += 1
-
     else:
-
         failed_count += 1
 
     time.sleep(2)
 
 
-# =========================
-# 最终报告
-# =========================
-
-print("\n================================")
+print("\n==============================")
 
 print(
-    f"执行完成："
-    f"新增回复 {success_count} 条，"
-    f"已有回复跳过 {skipped_count} 条，"
-    f"失败/待重试 {failed_count} 条"
+    f"Completed: "
+    f"{success_count} new replies, "
+    f"{skipped_count} existing replies skipped, "
+    f"{failed_count} failed."
 )
 
 send_report(
