@@ -1,4 +1,4 @@
-name: Auto Reply
+name: Google Play Auto Reply
 
 on:
   schedule:
@@ -8,22 +8,21 @@ on:
 jobs:
   reply:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
-      - name: Restore processed IDs cache
-        uses: actions/cache@v3
-        with:
-          path: processed_ids.txt
-          key: processed-ids-cache
-          restore-keys: |
-            processed-ids-cache
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install google-api-python-client google-auth requests
-      - run: python monitor.py
+
+      - name: Install dependencies
+        run: pip install google-api-python-client google-auth requests
+
+      - name: Run Google Play Auto Reply
+        run: python monitor.py
         env:
           SERVICE_ACCOUNT_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
           PACKAGE_NAME: ${{ secrets.PACKAGE_NAME }}
           WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
