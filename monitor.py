@@ -58,7 +58,7 @@ service = build(
 
 
 # ==================================================
-# Generate targeted AI reply
+# AI targeted reply
 # ==================================================
 
 def ai_generate_reply(review_text, rating):
@@ -75,8 +75,7 @@ You are the official customer support representative for PitPat.
 
 Write a short, natural and specific response to this Google Play review.
 
-Rating:
-{rating}/5
+Rating: {rating}/5
 
 Review:
 "{review_text}"
@@ -85,23 +84,23 @@ Requirements:
 
 1. Reply in the SAME LANGUAGE as the user's review.
 
-2. Carefully understand what the user actually said and respond
-   specifically to their experience, complaint, suggestion or praise.
+2. Carefully understand what the user actually said.
+   Respond specifically to their experience, complaint,
+   suggestion or praise.
 
-3. NEVER give a generic response such as:
+3. NEVER give generic responses such as:
    "Thanks for your feedback."
    "We'll address the issues you raised."
    "Thank you for your feedback. We will address your concerns."
 
-4. The response must clearly show that you understood the actual
-   content of the review.
+4. Your response must clearly show that you understood
+   the actual content of the review.
 
 5. If the review is positive:
    - thank the user naturally;
    - specifically mention the feature, experience or improvement
      they liked;
-   - do NOT talk about "issues" or "problems" when the user
-     did not report one.
+   - do NOT talk about issues or problems if they did not report one.
 
 6. If the user reports a bug or technical issue:
    - acknowledge the specific problem;
@@ -113,19 +112,18 @@ Requirements:
    achievements, milestones, subscription, payment,
    account, advertising, updates, reports, AI workouts,
    health data or another specific function,
-   mention the relevant topic naturally.
+   mention that topic naturally.
 
-8. If several problems are mentioned:
-   acknowledge the main problem or problems rather than
-   giving a vague response.
+8. If several problems are mentioned,
+   acknowledge the main problems specifically.
 
 9. Do NOT invent troubleshooting steps.
 
 10. Do NOT invent refunds, compensation, policies,
     product features or promises.
 
-11. Do NOT claim an issue has already been fixed unless
-    that is explicitly known.
+11. Do NOT claim an issue has already been fixed
+    unless that is explicitly known.
 
 12. Do NOT ask the user to change their rating.
 
@@ -187,7 +185,6 @@ Return ONLY the final reply.
 
             return None
 
-        # Remove accidental quotation marks
         reply = (
             reply
             .strip('"')
@@ -195,7 +192,6 @@ Return ONLY the final reply.
             .strip()
         )
 
-        # Final length protection
         if len(reply) > 320:
             reply = reply[:317].rstrip() + "..."
 
@@ -218,102 +214,96 @@ def get_all_reviews():
 
     try:
 
-        request = service.reviews().list(
-            packageName=PACKAGE_NAME,
-            maxResults=100
+        response = (
+            service
+            .reviews()
+            .list(
+                packageName=PACKAGE_NAME,
+                maxResults=100
+            )
+            .execute()
         )
 
-        while request is not None:
+        reviews = response.get(
+            "reviews",
+            []
+        )
 
-            response = request.execute()
+        print(
+            f"Google Play API returned "
+            f"{len(reviews)} reviews."
+        )
 
-            reviews = response.get(
-                "reviews",
+        for review in reviews:
+
+            review_id = review.get(
+                "reviewId"
+            )
+
+            if not review_id:
+                continue
+
+            comments = review.get(
+                "comments",
                 []
             )
 
-            for review in reviews:
+            user_comment = None
+            developer_comment = None
 
-                review_id = review.get(
-                    "reviewId"
-                )
+            # Find user review and developer reply separately.
+            for comment in comments:
 
-                if not review_id:
-                    continue
+                if "userComment" in comment:
+                    user_comment = (
+                        comment["userComment"]
+                    )
 
-                comments = review.get(
-                    "comments",
-                    []
-                )
+                if "developerComment" in comment:
+                    developer_comment = (
+                        comment["developerComment"]
+                    )
 
-                user_comment = None
-                developer_comment = None
+            if not user_comment:
+                continue
 
-                # Google can return both userComment
-                # and developerComment inside comments.
-                # Do not assume comments[0] is always userComment.
-                for comment in comments:
-
-                    if "userComment" in comment:
-                        user_comment = (
-                            comment["userComment"]
-                        )
-
-                    if "developerComment" in comment:
-                        developer_comment = (
-                            comment["developerComment"]
-                        )
-
-                if not user_comment:
-                    continue
-
-                review_text = (
-                    user_comment
-                    .get("text", "")
-                    .strip()
-                )
-
-                star_rating = (
-                    user_comment
-                    .get("starRating", 0)
-                )
-
-                if not review_text:
-                    continue
-
-                # ======================================
-                # CORE PROTECTION
-                #
-                # As long as Google currently has
-                # a developer reply, NEVER touch it.
-                #
-                # It does not matter whether the reply
-                # was created by AI or edited manually.
-                # ======================================
-
-                has_developer_reply = bool(
-                    developer_comment
-                    and developer_comment
-                    .get("text", "")
-                    .strip()
-                )
-
-                results.append({
-                    "id": review_id,
-                    "text": review_text,
-                    "rating": star_rating,
-                    "has_developer_reply":
-                        has_developer_reply
-                })
-
-            request = (
-                service
-                .reviews()
-                .list_next(
-                    previous_request=request,
-                    previous_response=response
-                )
+            review_text = (
+                user_comment
+                .get("text", "")
+                .strip()
             )
+
+            star_rating = (
+                user_comment
+                .get("starRating", 0)
+            )
+
+            if not review_text:
+                continue
+
+            # IMPORTANT:
+            # If ANY developer reply currently exists,
+            # this review must never be modified.
+            #
+            # This protects:
+            # - old automatic replies
+            # - new automatic replies
+            # - manual replies
+            # - manually edited replies
+            has_developer_reply = bool(
+                developer_comment
+                and developer_comment
+                .get("text", "")
+                .strip()
+            )
+
+            results.append({
+                "id": review_id,
+                "text": review_text,
+                "rating": star_rating,
+                "has_developer_reply":
+                    has_developer_reply
+            })
 
         print(
             f"Valid reviews received: "
@@ -332,7 +322,7 @@ def get_all_reviews():
 
 
 # ==================================================
-# Double-check one review before posting
+# Re-check current reply status
 # ==================================================
 
 def has_reply_now(review_id):
@@ -374,25 +364,22 @@ def has_reply_now(review_id):
 
     except Exception as e:
 
-        # IMPORTANT:
-        # If we cannot safely check the current status,
-        # do NOT post anything.
         print(
             f"Unable to re-check reply status "
             f"for {review_id}: {e}"
         )
 
+        # Fail safe:
+        # if status cannot be verified,
+        # do not send a reply.
         return None
 
 
 # ==================================================
-# Post Google Play reply
+# Post reply
 # ==================================================
 
-def post_reply(
-    review_id,
-    reply_text
-):
+def post_reply(review_id, reply_text):
 
     if not reply_text:
         return False
@@ -420,8 +407,7 @@ def post_reply(
         )
 
         print(
-            f"Reply successful: "
-            f"{review_id}"
+            f"Reply successful: {review_id}"
         )
 
         return True
@@ -482,15 +468,12 @@ def send_report(
 # MAIN
 # ==================================================
 
-print(
-    "Getting Google Play reviews..."
-)
+print("Getting Google Play reviews...")
 
 reviews = get_all_reviews()
 
 print(
-    f"Reviews checked: "
-    f"{len(reviews)}"
+    f"Reviews checked: {len(reviews)}"
 )
 
 success_count = 0
@@ -521,8 +504,8 @@ for review in reviews:
     )
 
     # ==================================================
-    # FIRST PROTECTION:
-    # Existing developer reply = NEVER TOUCH IT
+    # Protection 1:
+    # Existing reply = NEVER TOUCH IT
     # ==================================================
 
     if review[
@@ -539,7 +522,7 @@ for review in reviews:
         continue
 
     # ==================================================
-    # No reply -> generate targeted AI response
+    # No reply -> generate targeted response
     # ==================================================
 
     print(
@@ -552,8 +535,8 @@ for review in reviews:
         rating
     )
 
-    # AI failure:
-    # Do NOT use a generic fallback.
+    # No generic fallback.
+    # If AI fails, wait until the next run.
     if not reply:
 
         print(
@@ -572,12 +555,11 @@ for review in reviews:
     )
 
     # ==================================================
-    # SECOND PROTECTION:
+    # Protection 2:
+    # Check again immediately before posting.
     #
-    # Check Google AGAIN immediately before posting.
-    #
-    # If someone manually replied while AI was
-    # generating the response, do not overwrite it.
+    # If someone manually replied while the AI response
+    # was being generated, DO NOT overwrite it.
     # ==================================================
 
     current_reply_status = (
@@ -607,7 +589,7 @@ for review in reviews:
         continue
 
     # ==================================================
-    # Still no reply -> safe to post
+    # Still no reply -> post
     # ==================================================
 
     if post_reply(
