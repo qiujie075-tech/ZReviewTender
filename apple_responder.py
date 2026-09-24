@@ -30,11 +30,8 @@ MAX_AI_RETRIES = 5
 
 print("=== Apple App Store Auto Reply ===")
 print("Rule: Existing developer responses are NEVER modified.")
+print("Only reviews without a published response are processed.")
 print(f"AI model: {GROQ_MODEL}")
-print(
-    f"Rate-limit protection: "
-    f"{MAX_AI_RETRIES} retries + adaptive waiting."
-)
 
 
 # ==================================================
@@ -89,28 +86,24 @@ def create_apple_token():
         "\n"
     )
 
-    token = jwt.encode(
+    return jwt.encode(
         payload,
         private_key,
         algorithm="ES256",
         headers=headers
     )
 
-    return token
-
 
 def apple_headers():
 
     return {
-        "Authorization":
-            f"Bearer {create_apple_token()}",
-        "Content-Type":
-            "application/json"
+        "Authorization": f"Bearer {create_apple_token()}",
+        "Content-Type": "application/json"
     }
 
 
 # ==================================================
-# Extract AI reply
+# AI response extraction
 # ==================================================
 
 def extract_ai_reply(result):
@@ -120,13 +113,18 @@ def extract_ai_reply(result):
         choices = result.get("choices", [])
 
         if not choices:
-            print("AI response has no choices.")
             return None
 
         choice = choices[0]
-        message = choice.get("message", {})
 
-        content = message.get("content")
+        message = choice.get(
+            "message",
+            {}
+        )
+
+        content = message.get(
+            "content"
+        )
 
         if isinstance(content, str):
 
@@ -145,11 +143,15 @@ def extract_ai_reply(result):
                 if isinstance(item, str):
 
                     if item.strip():
-                        parts.append(item.strip())
+                        parts.append(
+                            item.strip()
+                        )
 
                 elif isinstance(item, dict):
 
-                    text_value = item.get("text")
+                    text_value = item.get(
+                        "text"
+                    )
 
                     if isinstance(
                         text_value,
@@ -157,6 +159,7 @@ def extract_ai_reply(result):
                     ):
 
                         if text_value.strip():
+
                             parts.append(
                                 text_value.strip()
                             )
@@ -180,10 +183,15 @@ def extract_ai_reply(result):
                             )
 
             if parts:
-                return "\n".join(parts).strip()
+
+                return "\n".join(
+                    parts
+                ).strip()
 
 
-        choice_text = choice.get("text")
+        choice_text = choice.get(
+            "text"
+        )
 
         if (
             isinstance(choice_text, str)
@@ -242,7 +250,6 @@ def clean_reply(reply):
     if not reply:
         return None
 
-    # Keep Apple replies concise.
     if len(reply) > 320:
 
         reply = (
@@ -255,7 +262,7 @@ def clean_reply(reply):
 
 
 # ==================================================
-# Groq retry waiting
+# Groq retry wait
 # ==================================================
 
 def get_retry_wait(
@@ -284,12 +291,10 @@ def get_retry_wait(
             pass
 
 
-    fallback = min(
+    return min(
         60,
         10 * (2 ** (attempt - 1))
     )
-
-    return fallback
 
 
 # ==================================================
@@ -305,6 +310,7 @@ def ai_generate_reply(
     headers = {
         "Authorization":
             f"Bearer {GROQ_API_KEY}",
+
         "Content-Type":
             "application/json"
     }
@@ -329,48 +335,29 @@ Rules:
 
 2. Carefully understand what the user actually said.
 
-3. The reply must respond to the specific feature,
+3. The reply must respond specifically to the user's
    experience, praise, complaint or suggestion.
 
-4. NEVER use generic replies such as:
+4. NEVER use generic responses such as:
    "Thanks for your feedback."
    "We'll address the issues you raised."
    "Thank you for your feedback. We will address your concerns."
 
-5. Positive review:
-   - thank the user naturally;
-   - specifically mention what they liked;
-   - do not mention problems if they reported none.
+5. For a positive review:
+   thank the user naturally and mention the specific
+   experience or feature they liked.
 
-6. Negative review:
-   - acknowledge the specific problem;
-   - apologize naturally when appropriate;
-   - mention the actual area they had trouble with.
+6. For a negative review:
+   acknowledge the specific issue and apologize naturally
+   when appropriate.
 
-7. If the review mentions:
-   - Apple Health
-   - Health data
-   - steps
-   - activity data
-   - treadmill
-   - device connection
-   - device pairing
-   - PitPat Band
-   - workout tracking
-   - audio cues
-   - voice coaching
-   - achievements
-   - milestones
-   - subscription
-   - payment
-   - ads
-   - account/login
-   - reports
-   - AI workouts
-   - social features
-   - another specific feature
-
-   respond to that exact topic naturally.
+7. If the review mentions Apple Health, health data,
+   steps, treadmill connection, device pairing,
+   PitPat Band, workout tracking, audio cues,
+   voice coaching, achievements, subscription,
+   payment, advertising, login, reports,
+   AI workouts, social features or another
+   specific feature, respond to that exact topic.
 
 8. Do NOT invent troubleshooting instructions.
 
@@ -381,10 +368,10 @@ Rules:
 
 11. Do NOT ask the user to change their rating.
 
-12. Do NOT mention AI, automation, Groq
+12. Do NOT mention AI, Groq, automation
     or automated replies.
 
-13. Friendly, professional and natural tone.
+13. Keep the tone friendly, professional and natural.
 
 14. Avoid repetitive wording.
 
@@ -437,7 +424,9 @@ Return ONLY the final public reply.
 
         except requests.exceptions.Timeout:
 
-            print("AI request timed out.")
+            print(
+                "AI request timed out."
+            )
 
             if attempt < MAX_AI_RETRIES:
 
@@ -451,7 +440,9 @@ Return ONLY the final public reply.
                     f"before retry..."
                 )
 
-                time.sleep(wait_seconds)
+                time.sleep(
+                    wait_seconds
+                )
 
                 continue
 
@@ -476,7 +467,9 @@ Return ONLY the final public reply.
                     f"before retry..."
                 )
 
-                time.sleep(wait_seconds)
+                time.sleep(
+                    wait_seconds
+                )
 
                 continue
 
@@ -527,21 +520,6 @@ Return ONLY the final public reply.
                 "AI returned no usable final reply."
             )
 
-            try:
-
-                safe_debug = json.dumps(
-                    result,
-                    ensure_ascii=False
-                )
-
-                print(
-                    "AI response structure: "
-                    + safe_debug[:2500]
-                )
-
-            except Exception:
-                pass
-
             return None
 
 
@@ -570,10 +548,6 @@ Return ONLY the final public reply.
 
                 continue
 
-            print(
-                "Maximum rate-limit retries reached."
-            )
-
             return None
 
 
@@ -593,7 +567,7 @@ Return ONLY the final public reply.
                 )
 
                 print(
-                    f"Temporary Groq error. "
+                    f"Temporary AI error. "
                     f"Waiting {wait_seconds}s "
                     f"before retry..."
                 )
@@ -607,7 +581,6 @@ Return ONLY the final public reply.
             return None
 
 
-        # OTHER ERROR
         print(
             f"AI request failed: "
             f"HTTP {response.status_code}"
@@ -625,10 +598,10 @@ Return ONLY the final public reply.
 
 
 # ==================================================
-# Get Apple reviews
+# Get ONLY Apple reviews without published responses
 # ==================================================
 
-def get_reviews():
+def get_unanswered_reviews():
 
     url = (
         f"{APPLE_API_BASE}/apps/"
@@ -637,8 +610,14 @@ def get_reviews():
 
     params = {
         "limit": 50,
-        "sort": "-createdDate"
+        "sort": "-createdDate",
+
+        # IMPORTANT:
+        # Apple itself filters reviews that do NOT
+        # currently have a published developer response.
+        "exists[publishedResponse]": "false"
     }
+
 
     try:
 
@@ -649,16 +628,21 @@ def get_reviews():
             timeout=30
         )
 
+
         print(
-            f"Apple reviews HTTP status: "
+            f"Apple unanswered reviews HTTP status: "
             f"{response.status_code}"
         )
+
 
         if response.status_code != 200:
 
             print(
-                f"Failed to get Apple reviews: "
-                f"{response.text[:1000]}"
+                "Failed to get unanswered reviews."
+            )
+
+            print(
+                response.text[:1000]
             )
 
             return []
@@ -671,10 +655,13 @@ def get_reviews():
             []
         )
 
+
         print(
             f"Apple API returned "
-            f"{len(reviews)} reviews."
+            f"{len(reviews)} reviews "
+            f"without a published response."
         )
+
 
         return reviews
 
@@ -689,17 +676,21 @@ def get_reviews():
 
 
 # ==================================================
-# Check whether Apple review already has response
+# FINAL SAFETY CHECK
+#
+# Use Apple's relationship endpoint.
+# We do NOT update existing responses.
 # ==================================================
 
-def check_existing_response(
+def has_response_now(
     review_id
 ):
 
     url = (
         f"{APPLE_API_BASE}/customerReviews/"
-        f"{review_id}/response"
+        f"{review_id}/relationships/response"
     )
+
 
     try:
 
@@ -710,34 +701,80 @@ def check_existing_response(
         )
 
 
-        # Existing developer response
+        print(
+            f"Response safety check HTTP status: "
+            f"{response.status_code}"
+        )
+
+
         if response.status_code == 200:
 
             try:
 
                 result = response.json()
 
-                data = result.get("data")
+            except Exception as e:
 
-                if data:
+                print(
+                    f"Unable to parse response relationship: {e}"
+                )
+
+                return None
+
+
+            data = result.get(
+                "data"
+            )
+
+
+            # No linked response
+            if data is None:
+
+                return False
+
+
+            # Existing response linkage
+            if isinstance(data, dict):
+
+                response_id = data.get(
+                    "id"
+                )
+
+                if response_id:
+
                     return True
 
-            except Exception:
-                pass
 
-            # 200 but unable to safely determine state
+            # Unexpected structure -> fail safely
+            print(
+                "Unexpected Apple response relationship structure."
+            )
+
             return None
 
 
-        # No response exists
+        # Review or relationship cannot be safely verified.
         if response.status_code == 404:
 
-            return False
+            print(
+                "Safety check returned 404. "
+                "Will NOT post automatically."
+            )
+
+            return None
+
+
+        if response.status_code == 429:
+
+            print(
+                "Apple API rate limit during safety check."
+            )
+
+            return None
 
 
         print(
-            f"Unexpected Apple response check "
-            f"status for {review_id}: "
+            f"Unexpected safety check status: "
             f"HTTP {response.status_code}"
         )
 
@@ -745,14 +782,13 @@ def check_existing_response(
             response.text[:500]
         )
 
-        # Fail safely
         return None
 
 
     except Exception as e:
 
         print(
-            f"Failed to check existing response "
+            f"Safety check failed "
             f"for {review_id}: {e}"
         )
 
@@ -760,7 +796,7 @@ def check_existing_response(
 
 
 # ==================================================
-# Post Apple response
+# Post Apple reply
 # ==================================================
 
 def post_apple_reply(
@@ -776,17 +812,22 @@ def post_apple_reply(
 
     payload = {
         "data": {
+
             "type":
                 "customerReviewResponses",
 
             "attributes": {
+
                 "responseBody":
                     reply_text
             },
 
             "relationships": {
+
                 "review": {
+
                     "data": {
+
                         "type":
                             "customerReviews",
 
@@ -809,6 +850,12 @@ def post_apple_reply(
         )
 
 
+        print(
+            f"Apple reply HTTP status: "
+            f"{response.status_code}"
+        )
+
+
         if response.status_code in [
             200,
             201
@@ -824,8 +871,7 @@ def post_apple_reply(
 
         print(
             f"Reply failed: "
-            f"{review_id} - "
-            f"HTTP {response.status_code}"
+            f"{review_id}"
         )
 
         print(
@@ -846,7 +892,7 @@ def post_apple_reply(
 
 
 # ==================================================
-# Webhook
+# Webhook report
 # ==================================================
 
 def send_report(
@@ -862,7 +908,7 @@ def send_report(
     content = (
         "Apple App Store Auto Reply completed\n"
         f"New replies: {success}\n"
-        f"Existing replies skipped: {skipped}\n"
+        f"Safety skips: {skipped}\n"
         f"Failed / waiting for retry: {failed}"
     )
 
@@ -896,13 +942,13 @@ def send_report(
 # ==================================================
 
 print(
-    "Getting Apple App Store reviews..."
+    "Getting unanswered Apple App Store reviews..."
 )
 
-reviews = get_reviews()
+reviews = get_unanswered_reviews()
 
 print(
-    f"Reviews checked: "
+    f"Unanswered reviews checked: "
     f"{len(reviews)}"
 )
 
@@ -914,7 +960,9 @@ failed_count = 0
 
 for review in reviews:
 
-    review_id = review.get("id")
+    review_id = review.get(
+        "id"
+    )
 
     attributes = review.get(
         "attributes",
@@ -964,19 +1012,16 @@ for review in reviews:
     )
 
     print(
-        f"Review: "
-        f"{review_text[:250]}"
+        f"Review: {review_text[:250]}"
     )
 
 
     # ==================================================
-    # Check existing developer response
+    # First safety check
     # ==================================================
 
-    existing_status = (
-        check_existing_response(
-            review_id
-        )
+    existing_status = has_response_now(
+        review_id
     )
 
 
@@ -995,8 +1040,8 @@ for review in reviews:
     if existing_status is None:
 
         print(
-            "SKIP: Could not safely determine "
-            "whether a response exists. "
+            "SKIP: Could not safely verify "
+            "response status. "
             "No reply posted."
         )
 
@@ -1006,7 +1051,7 @@ for review in reviews:
 
 
     # ==================================================
-    # No response -> AI
+    # No response -> generate targeted AI reply
     # ==================================================
 
     print(
@@ -1031,11 +1076,6 @@ for review in reviews:
 
         failed_count += 1
 
-        print(
-            f"Waiting {REQUEST_INTERVAL}s "
-            f"before next review..."
-        )
-
         time.sleep(
             REQUEST_INTERVAL
         )
@@ -1051,17 +1091,14 @@ for review in reviews:
 
 
     # ==================================================
-    # CRITICAL:
-    # Check again immediately before posting.
+    # SECOND SAFETY CHECK
     #
-    # If you manually replied while AI was generating,
-    # automation MUST NOT overwrite it.
+    # Someone may have manually replied while
+    # AI was generating.
     # ==================================================
 
-    current_status = (
-        check_existing_response(
-            review_id
-        )
+    current_status = has_response_now(
+        review_id
     )
 
 
@@ -1082,7 +1119,7 @@ for review in reviews:
 
         print(
             "SKIP: Could not safely verify "
-            "current response status. "
+            "response status before posting. "
             "No reply posted."
         )
 
@@ -1092,7 +1129,7 @@ for review in reviews:
 
 
     # ==================================================
-    # Still unanswered -> post
+    # Still unanswered -> POST
     # ==================================================
 
     if post_apple_reply(
@@ -1128,7 +1165,7 @@ print(
 print(
     f"Completed: "
     f"{success_count} new replies, "
-    f"{skipped_count} existing replies skipped, "
+    f"{skipped_count} safety skips, "
     f"{failed_count} failed."
 )
 
