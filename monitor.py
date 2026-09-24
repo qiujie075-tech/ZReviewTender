@@ -98,9 +98,8 @@ Requirements:
 
 5. If the review is positive:
    - thank the user naturally;
-   - specifically mention the feature, experience or improvement
-     they liked;
-   - do NOT talk about issues or problems if they did not report one.
+   - specifically mention what they liked;
+   - do NOT mention problems if they did not report one.
 
 6. If the user reports a bug or technical issue:
    - acknowledge the specific problem;
@@ -111,8 +110,8 @@ Requirements:
    device pairing, PitPat Band, workout tracking,
    achievements, milestones, subscription, payment,
    account, advertising, updates, reports, AI workouts,
-   health data or another specific function,
-   mention that topic naturally.
+   health data, audio cues, voice coaching or another
+   specific function, mention that topic naturally.
 
 8. If several problems are mentioned,
    acknowledge the main problems specifically.
@@ -139,7 +138,7 @@ Return ONLY the final reply.
 """
 
     data = {
-        "model": "llama-3.1-8b-instant",
+        "model": "openai/gpt-oss-20b",
         "messages": [
             {
                 "role": "user",
@@ -182,7 +181,6 @@ Return ONLY the final reply.
         if not reply:
 
             print("AI returned empty reply.")
-
             return None
 
         reply = (
@@ -200,7 +198,6 @@ Return ONLY the final reply.
     except Exception as e:
 
         print(f"AI error: {e}")
-
         return None
 
 
@@ -224,10 +221,7 @@ def get_all_reviews():
             .execute()
         )
 
-        reviews = response.get(
-            "reviews",
-            []
-        )
+        reviews = response.get("reviews", [])
 
         print(
             f"Google Play API returned "
@@ -236,33 +230,23 @@ def get_all_reviews():
 
         for review in reviews:
 
-            review_id = review.get(
-                "reviewId"
-            )
+            review_id = review.get("reviewId")
 
             if not review_id:
                 continue
 
-            comments = review.get(
-                "comments",
-                []
-            )
+            comments = review.get("comments", [])
 
             user_comment = None
             developer_comment = None
 
-            # Find user review and developer reply separately.
             for comment in comments:
 
                 if "userComment" in comment:
-                    user_comment = (
-                        comment["userComment"]
-                    )
+                    user_comment = comment["userComment"]
 
                 if "developerComment" in comment:
-                    developer_comment = (
-                        comment["developerComment"]
-                    )
+                    developer_comment = comment["developerComment"]
 
             if not user_comment:
                 continue
@@ -273,23 +257,11 @@ def get_all_reviews():
                 .strip()
             )
 
-            star_rating = (
-                user_comment
-                .get("starRating", 0)
-            )
+            star_rating = user_comment.get("starRating", 0)
 
             if not review_text:
                 continue
 
-            # IMPORTANT:
-            # If ANY developer reply currently exists,
-            # this review must never be modified.
-            #
-            # This protects:
-            # - old automatic replies
-            # - new automatic replies
-            # - manual replies
-            # - manually edited replies
             has_developer_reply = bool(
                 developer_comment
                 and developer_comment
@@ -301,66 +273,68 @@ def get_all_reviews():
                 "id": review_id,
                 "text": review_text,
                 "rating": star_rating,
-                "has_developer_reply":
-                    has_developer_reply
+                "has_developer_reply": has_developer_reply
             })
 
-        print(
-            f"Valid reviews received: "
-            f"{len(results)}"
-        )
+        print(f"Valid reviews received: {len(results)}")
 
         return results
 
     except Exception as e:
 
-        print(
-            f"Failed to get Google Play reviews: {e}"
-        )
-
+        print(f"Failed to get Google Play reviews: {e}")
         return []
 
 
 # ==================================================
-# Re-check current reply status
+# Re-check reply status
+#
+# Re-list reviews instead of using reviews().get().
+# Existing developer reply = never overwrite.
 # ==================================================
 
 def has_reply_now(review_id):
 
     try:
 
-        review = (
+        response = (
             service
             .reviews()
-            .get(
+            .list(
                 packageName=PACKAGE_NAME,
-                reviewId=review_id
+                maxResults=100
             )
             .execute()
         )
 
-        comments = review.get(
-            "comments",
-            []
-        )
+        reviews = response.get("reviews", [])
 
-        for comment in comments:
+        for review in reviews:
 
-            developer_comment = (
-                comment.get(
+            if review.get("reviewId") != review_id:
+                continue
+
+            comments = review.get("comments", [])
+
+            for comment in comments:
+
+                developer_comment = comment.get(
                     "developerComment"
                 )
-            )
 
-            if (
-                developer_comment
-                and developer_comment
-                .get("text", "")
-                .strip()
-            ):
-                return True
+                if (
+                    developer_comment
+                    and developer_comment
+                    .get("text", "")
+                    .strip()
+                ):
+                    return True
 
-        return False
+            return False
+
+        # Could not find the review during re-check.
+        # Fail safely: do not post.
+        return None
 
     except Exception as e:
 
@@ -369,9 +343,6 @@ def has_reply_now(review_id):
             f"for {review_id}: {e}"
         )
 
-        # Fail safe:
-        # if status cannot be verified,
-        # do not send a reply.
         return None
 
 
@@ -385,11 +356,7 @@ def post_reply(review_id, reply_text):
         return False
 
     if len(reply_text) > 320:
-        reply_text = (
-            reply_text[:317]
-            .rstrip()
-            + "..."
-        )
+        reply_text = reply_text[:317].rstrip() + "..."
 
     try:
 
@@ -406,9 +373,7 @@ def post_reply(review_id, reply_text):
             .execute()
         )
 
-        print(
-            f"Reply successful: {review_id}"
-        )
+        print(f"Reply successful: {review_id}")
 
         return True
 
@@ -423,14 +388,10 @@ def post_reply(review_id, reply_text):
 
 
 # ==================================================
-# Webhook report
+# Webhook
 # ==================================================
 
-def send_report(
-    success,
-    skipped,
-    failed
-):
+def send_report(success, skipped, failed):
 
     if not WEBHOOK_URL:
         return
@@ -459,9 +420,7 @@ def send_report(
 
     except Exception as e:
 
-        print(
-            f"Webhook error: {e}"
-        )
+        print(f"Webhook error: {e}")
 
 
 # ==================================================
@@ -472,9 +431,7 @@ print("Getting Google Play reviews...")
 
 reviews = get_all_reviews()
 
-print(
-    f"Reviews checked: {len(reviews)}"
-)
+print(f"Reviews checked: {len(reviews)}")
 
 success_count = 0
 skipped_count = 0
@@ -487,30 +444,13 @@ for review in reviews:
     review_text = review["text"]
     rating = review["rating"]
 
-    print(
-        "\n------------------------------"
-    )
+    print("\n------------------------------")
+    print(f"Review ID: {review_id}")
+    print(f"Rating: {rating}")
+    print(f"Review: {review_text[:200]}")
 
-    print(
-        f"Review ID: {review_id}"
-    )
-
-    print(
-        f"Rating: {rating}"
-    )
-
-    print(
-        f"Review: {review_text[:200]}"
-    )
-
-    # ==================================================
-    # Protection 1:
-    # Existing reply = NEVER TOUCH IT
-    # ==================================================
-
-    if review[
-        "has_developer_reply"
-    ]:
+    # Existing reply -> NEVER MODIFY
+    if review["has_developer_reply"]:
 
         print(
             "SKIP: Developer reply already exists. "
@@ -518,13 +458,9 @@ for review in reviews:
         )
 
         skipped_count += 1
-
         continue
 
-    # ==================================================
-    # No reply -> generate targeted response
-    # ==================================================
-
+    # No reply -> AI generation
     print(
         "No existing reply. "
         "Generating targeted response..."
@@ -535,8 +471,7 @@ for review in reviews:
         rating
     )
 
-    # No generic fallback.
-    # If AI fails, wait until the next run.
+    # AI failure -> don't use generic fallback
     if not reply:
 
         print(
@@ -545,7 +480,6 @@ for review in reviews:
         )
 
         failed_count += 1
-
         continue
 
     print(
@@ -554,17 +488,8 @@ for review in reviews:
         f"{reply}"
     )
 
-    # ==================================================
-    # Protection 2:
-    # Check again immediately before posting.
-    #
-    # If someone manually replied while the AI response
-    # was being generated, DO NOT overwrite it.
-    # ==================================================
-
-    current_reply_status = (
-        has_reply_now(review_id)
-    )
+    # Re-check before posting
+    current_reply_status = has_reply_now(review_id)
 
     if current_reply_status is True:
 
@@ -574,7 +499,6 @@ for review in reviews:
         )
 
         skipped_count += 1
-
         continue
 
     if current_reply_status is None:
@@ -585,22 +509,12 @@ for review in reviews:
         )
 
         failed_count += 1
-
         continue
 
-    # ==================================================
     # Still no reply -> post
-    # ==================================================
-
-    if post_reply(
-        review_id,
-        reply
-    ):
-
+    if post_reply(review_id, reply):
         success_count += 1
-
     else:
-
         failed_count += 1
 
     time.sleep(2)
@@ -610,9 +524,7 @@ for review in reviews:
 # Final report
 # ==================================================
 
-print(
-    "\n=============================="
-)
+print("\n==============================")
 
 print(
     f"Completed: "
