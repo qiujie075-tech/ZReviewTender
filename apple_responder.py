@@ -1,34 +1,58 @@
 import os
 import time
-import jwt
+import json
 import requests
-from datetime import datetime
+import jwt
+from datetime import datetime, timedelta, timezone
 
-PRIVATE_KEY = os.environ.get("APPLE_PRIVATE_KEY")
-KEY_ID = os.environ.get("APPLE_KEY_ID")
-ISSUER_ID = os.environ.get("APPLE_ISSUER_ID")
+
+# ==================================================
+# Configuration
+# ==================================================
 
 APP_ID = "1598065258"
 
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+APPLE_PRIVATE_KEY = os.environ.get("APPLE_PRIVATE_KEY")
+APPLE_KEY_ID = os.environ.get("APPLE_KEY_ID")
+APPLE_ISSUER_ID = os.environ.get("APPLE_ISSUER_ID")
+
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
+
+APPLE_API_BASE = "https://api.appstoreconnect.apple.com/v1"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+GROQ_MODEL = "openai/gpt-oss-20b"
+
+REQUEST_INTERVAL = 4
+MAX_AI_RETRIES = 5
+
 
 print("=== Apple App Store Auto Reply ===")
-print("Rule: Only reply to reviews that currently have NO developer response.")
+print("Rule: Existing developer responses are NEVER modified.")
+print(f"AI model: {GROQ_MODEL}")
+print(
+    f"Rate-limit protection: "
+    f"{MAX_AI_RETRIES} retries + adaptive waiting."
+)
 
 
 # ==================================================
-# Environment variables
+# Check environment variables
 # ==================================================
 
 required_envs = {
-    "APPLE_PRIVATE_KEY": PRIVATE_KEY,
-    "APPLE_KEY_ID": KEY_ID,
-    "APPLE_ISSUER_ID": ISSUER_ID,
+    "APPLE_PRIVATE_KEY": APPLE_PRIVATE_KEY,
+    "APPLE_KEY_ID": APPLE_KEY_ID,
+    "APPLE_ISSUER_ID": APPLE_ISSUER_ID,
     "GROQ_API_KEY": GROQ_API_KEY,
 }
 
-missing = [name for name, value in required_envs.items() if not value]
+missing = [
+    name
+    for name, value in required_envs.items()
+    if not value
+]
 
 if missing:
     raise Exception(
@@ -40,262 +64,697 @@ if missing:
 # Apple JWT
 # ==================================================
 
-def generate_token():
+def create_apple_token():
 
-    headers = {
-        "alg": "ES256",
-        "kid": KEY_ID,
-        "typ": "JWT"
-    }
+    now = datetime.now(timezone.utc)
 
     payload = {
-        "iss": ISSUER_ID,
-        "exp": int(datetime.utcnow().timestamp()) + 20 * 60,
+        "iss": APPLE_ISSUER_ID,
+        "iat": int(now.timestamp()),
+        "exp": int(
+            (
+                now + timedelta(minutes=20)
+            ).timestamp()
+        ),
         "aud": "appstoreconnect-v1"
     }
 
-    return jwt.encode(
+    headers = {
+        "kid": APPLE_KEY_ID,
+        "typ": "JWT"
+    }
+
+    private_key = APPLE_PRIVATE_KEY.replace(
+        "\\n",
+        "\n"
+    )
+
+    token = jwt.encode(
         payload,
-        PRIVATE_KEY,
+        private_key,
         algorithm="ES256",
         headers=headers
     )
+
+    return token
 
 
 def apple_headers():
 
     return {
-        "Authorization": f"Bearer {generate_token()}",
-        "Content-Type": "application/json"
+        "Authorization":
+            f"Bearer {create_apple_token()}",
+        "Content-Type":
+            "application/json"
     }
 
 
 # ==================================================
-# Get reviews
+# Extract AI reply
 # ==================================================
 
-def get_reviews():
-
-    url = (
-        f"https://api.appstoreconnect.apple.com/v1/apps/"
-        f"{APP_ID}/customerReviews"
-        f"?limit=50&sort=-createdDate"
-    )
+def extract_ai_reply(result):
 
     try:
 
-        response = requests.get(
-            url,
-            headers=apple_headers(),
-            timeout=20
+        choices = result.get("choices", [])
+
+        if not choices:
+            print("AI response has no choices.")
+            return None
+
+        choice = choices[0]
+        message = choice.get("message", {})
+
+        content = message.get("content")
+
+        if isinstance(content, str):
+
+            content = content.strip()
+
+            if content:
+                return content
+
+
+        if isinstance(content, list):
+
+            parts = []
+
+            for item in content:
+
+                if isinstance(item, str):
+
+                    if item.strip():
+                        parts.append(item.strip())
+
+                elif isinstance(item, dict):
+
+                    text_value = item.get("text")
+
+                    if isinstance(
+                        text_value,
+                        str
+                    ):
+
+                        if text_value.strip():
+                            parts.append(
+                                text_value.strip()
+                            )
+
+                    elif isinstance(
+                        text_value,
+                        dict
+                    ):
+
+                        value = text_value.get(
+                            "value"
+                        )
+
+                        if (
+                            isinstance(value, str)
+                            and value.strip()
+                        ):
+
+                            parts.append(
+                                value.strip()
+                            )
+
+            if parts:
+                return "\n".join(parts).strip()
+
+
+        choice_text = choice.get("text")
+
+        if (
+            isinstance(choice_text, str)
+            and choice_text.strip()
+        ):
+
+            return choice_text.strip()
+
+
+        return None
+
+    except Exception as e:
+
+        print(
+            f"Failed to parse AI response: {e}"
         )
 
-        if response.status_code != 200:
+        return None
 
-            print(
-                f"Failed to get reviews: "
-                f"{response.status_code} "
-                f"{response.text[:500]}"
+
+# ==================================================
+# Clean reply
+# ==================================================
+
+def clean_reply(reply):
+
+    if not reply:
+        return None
+
+    reply = (
+        reply
+        .strip()
+        .strip('"')
+        .strip("'")
+        .strip()
+    )
+
+    prefixes = [
+        "Final answer:",
+        "Final reply:",
+        "Response:",
+        "Reply:"
+    ]
+
+    for prefix in prefixes:
+
+        if reply.lower().startswith(
+            prefix.lower()
+        ):
+
+            reply = (
+                reply[len(prefix):]
+                .strip()
             )
 
-            return []
+    if not reply:
+        return None
 
-        return response.json().get("data", [])
+    # Keep Apple replies concise.
+    if len(reply) > 320:
 
-    except Exception as e:
+        reply = (
+            reply[:317]
+            .rstrip()
+            + "..."
+        )
 
-        print(f"Get reviews error: {e}")
-
-        return []
+    return reply
 
 
 # ==================================================
-# IMPORTANT:
-# Check whether Apple currently has a developer reply
+# Groq retry waiting
 # ==================================================
 
-def has_existing_reply(review_id):
+def get_retry_wait(
+    response,
+    attempt
+):
 
-    url = (
-        "https://api.appstoreconnect.apple.com/v1/"
-        f"customerReviews/{review_id}/response"
+    retry_after = response.headers.get(
+        "retry-after"
     )
 
-    try:
+    if retry_after:
 
-        response = requests.get(
-            url,
-            headers=apple_headers(),
-            timeout=20
-        )
+        try:
 
-        # A response object exists.
-        if response.status_code == 200:
+            wait_seconds = float(
+                retry_after
+            )
 
-            data = response.json().get("data")
+            return max(
+                2,
+                wait_seconds + 2
+            )
 
-            if data:
-                return True
+        except Exception:
+            pass
 
-            return False
 
-        # Apple says no response exists.
-        if response.status_code == 404:
-            return False
+    fallback = min(
+        60,
+        10 * (2 ** (attempt - 1))
+    )
 
-        # IMPORTANT:
-        # If Apple returns an unexpected error,
-        # DO NOT assume that there is no reply.
-        # Skip the review instead to protect manual replies.
-        print(
-            f"Unable to verify existing response for {review_id}: "
-            f"HTTP {response.status_code} "
-            f"{response.text[:300]}"
-        )
-
-        return None
-
-    except Exception as e:
-
-        print(
-            f"Unable to verify existing response for "
-            f"{review_id}: {e}"
-        )
-
-        # Fail safe:
-        # uncertain = do not reply
-        return None
+    return fallback
 
 
 # ==================================================
-# Generate targeted AI reply
+# AI targeted reply
 # ==================================================
 
-def generate_ai_reply(review_text, rating):
-
-    url = "https://api.groq.com/openai/v1/chat/completions"
+def ai_generate_reply(
+    review_text,
+    rating,
+    title=""
+):
 
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
+        "Authorization":
+            f"Bearer {GROQ_API_KEY}",
+        "Content-Type":
+            "application/json"
     }
+
 
     prompt = f"""
 You are the official customer support representative for PitPat.
 
-Write a short, natural and specific response to this App Store review.
+Write ONE short public response to this Apple App Store review.
 
-Rating: {rating}/5
+Star rating: {rating}/5
+
+Review title:
+"{title}"
 
 Review:
 "{review_text}"
 
-Requirements:
+Rules:
 
-1. Reply in the SAME LANGUAGE as the user's review.
+1. Reply in the SAME LANGUAGE as the original review.
 
-2. Read the review carefully and respond specifically to what
-   the user actually said.
+2. Carefully understand what the user actually said.
 
-3. Do NOT use generic responses such as:
+3. The reply must respond to the specific feature,
+   experience, praise, complaint or suggestion.
+
+4. NEVER use generic replies such as:
+   "Thanks for your feedback."
+   "We'll address the issues you raised."
    "Thank you for your feedback. We will address your concerns."
 
-4. If the user reports a bug or technical issue:
-   acknowledge the specific problem and briefly apologize
-   when appropriate.
+5. Positive review:
+   - thank the user naturally;
+   - specifically mention what they liked;
+   - do not mention problems if they reported none.
 
-5. If the review mentions login, connection, treadmill,
-   device pairing, PitPat Band, workout tracking,
-   subscription, payment, account, advertising, update,
-   or another specific function, mention that issue naturally.
+6. Negative review:
+   - acknowledge the specific problem;
+   - apologize naturally when appropriate;
+   - mention the actual area they had trouble with.
 
-6. If the review is positive:
-   thank the user naturally and respond to the specific
-   feature or experience they liked.
+7. If the review mentions:
+   - Apple Health
+   - Health data
+   - steps
+   - activity data
+   - treadmill
+   - device connection
+   - device pairing
+   - PitPat Band
+   - workout tracking
+   - audio cues
+   - voice coaching
+   - achievements
+   - milestones
+   - subscription
+   - payment
+   - ads
+   - account/login
+   - reports
+   - AI workouts
+   - social features
+   - another specific feature
 
-7. If several issues are mentioned:
-   acknowledge the main issue or issues instead of giving
-   a generic response.
+   respond to that exact topic naturally.
 
-8. Do NOT invent troubleshooting steps.
+8. Do NOT invent troubleshooting instructions.
 
-9. Do NOT invent refunds, compensation, policies,
-   product features or promises.
+9. Do NOT invent refunds, compensation or policies.
 
-10. Do NOT claim that an issue has already been fixed
-    unless that is known.
+10. Do NOT claim something has already been fixed
+    unless that information is known.
 
 11. Do NOT ask the user to change their rating.
 
-12. Do NOT mention AI or automated replies.
+12. Do NOT mention AI, automation, Groq
+    or automated replies.
 
-13. Keep the tone friendly, professional and human.
+13. Friendly, professional and natural tone.
 
-14. Maximum 300 characters.
+14. Avoid repetitive wording.
 
-Return ONLY the final reply.
+15. Maximum 320 characters.
+
+Return ONLY the final public reply.
 """
 
+
     data = {
-        "model": "llama-3.1-8b-instant",
+        "model": GROQ_MODEL,
+
         "messages": [
             {
                 "role": "user",
                 "content": prompt
             }
         ],
-        "max_tokens": 180,
-        "temperature": 0.5
+
+        "temperature": 0.5,
+
+        "max_completion_tokens": 350,
+
+        "reasoning_effort": "low",
+
+        "include_reasoning": False,
+
+        "stream": False
+    }
+
+
+    for attempt in range(
+        1,
+        MAX_AI_RETRIES + 1
+    ):
+
+        print(
+            f"AI request attempt "
+            f"{attempt}/{MAX_AI_RETRIES}..."
+        )
+
+        try:
+
+            response = requests.post(
+                GROQ_URL,
+                headers=headers,
+                json=data,
+                timeout=60
+            )
+
+        except requests.exceptions.Timeout:
+
+            print("AI request timed out.")
+
+            if attempt < MAX_AI_RETRIES:
+
+                wait_seconds = min(
+                    60,
+                    10 * attempt
+                )
+
+                print(
+                    f"Waiting {wait_seconds}s "
+                    f"before retry..."
+                )
+
+                time.sleep(wait_seconds)
+
+                continue
+
+            return None
+
+
+        except Exception as e:
+
+            print(
+                f"AI request error: {e}"
+            )
+
+            if attempt < MAX_AI_RETRIES:
+
+                wait_seconds = min(
+                    60,
+                    10 * attempt
+                )
+
+                print(
+                    f"Waiting {wait_seconds}s "
+                    f"before retry..."
+                )
+
+                time.sleep(wait_seconds)
+
+                continue
+
+            return None
+
+
+        print(
+            f"AI HTTP status: "
+            f"{response.status_code}"
+        )
+
+
+        # SUCCESS
+        if response.status_code == 200:
+
+            try:
+
+                result = response.json()
+
+            except Exception as e:
+
+                print(
+                    f"AI returned invalid JSON: {e}"
+                )
+
+                return None
+
+
+            reply = extract_ai_reply(
+                result
+            )
+
+            reply = clean_reply(
+                reply
+            )
+
+
+            if reply:
+
+                print(
+                    "AI reply generated successfully."
+                )
+
+                return reply
+
+
+            print(
+                "AI returned no usable final reply."
+            )
+
+            try:
+
+                safe_debug = json.dumps(
+                    result,
+                    ensure_ascii=False
+                )
+
+                print(
+                    "AI response structure: "
+                    + safe_debug[:2500]
+                )
+
+            except Exception:
+                pass
+
+            return None
+
+
+        # RATE LIMIT
+        if response.status_code == 429:
+
+            wait_seconds = get_retry_wait(
+                response,
+                attempt
+            )
+
+            print(
+                "Groq rate limit reached."
+            )
+
+            if attempt < MAX_AI_RETRIES:
+
+                print(
+                    f"Waiting {wait_seconds:.1f}s "
+                    f"before automatic retry..."
+                )
+
+                time.sleep(
+                    wait_seconds
+                )
+
+                continue
+
+            print(
+                "Maximum rate-limit retries reached."
+            )
+
+            return None
+
+
+        # TEMPORARY ERRORS
+        if response.status_code in [
+            500,
+            502,
+            503,
+            504
+        ]:
+
+            if attempt < MAX_AI_RETRIES:
+
+                wait_seconds = min(
+                    60,
+                    10 * attempt
+                )
+
+                print(
+                    f"Temporary Groq error. "
+                    f"Waiting {wait_seconds}s "
+                    f"before retry..."
+                )
+
+                time.sleep(
+                    wait_seconds
+                )
+
+                continue
+
+            return None
+
+
+        # OTHER ERROR
+        print(
+            f"AI request failed: "
+            f"HTTP {response.status_code}"
+        )
+
+        print(
+            f"AI error body: "
+            f"{response.text[:1000]}"
+        )
+
+        return None
+
+
+    return None
+
+
+# ==================================================
+# Get Apple reviews
+# ==================================================
+
+def get_reviews():
+
+    url = (
+        f"{APPLE_API_BASE}/apps/"
+        f"{APP_ID}/customerReviews"
+    )
+
+    params = {
+        "limit": 50,
+        "sort": "-createdDate"
     }
 
     try:
 
-        response = requests.post(
+        response = requests.get(
             url,
-            headers=headers,
-            json=data,
+            headers=apple_headers(),
+            params=params,
             timeout=30
+        )
+
+        print(
+            f"Apple reviews HTTP status: "
+            f"{response.status_code}"
         )
 
         if response.status_code != 200:
 
             print(
-                f"AI request failed: "
-                f"HTTP {response.status_code} "
-                f"{response.text[:500]}"
+                f"Failed to get Apple reviews: "
+                f"{response.text[:1000]}"
             )
 
-            return None
+            return []
+
 
         result = response.json()
 
-        reply = (
-            result
-            .get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-            .strip()
+        reviews = result.get(
+            "data",
+            []
         )
 
-        if not reply:
+        print(
+            f"Apple API returned "
+            f"{len(reviews)} reviews."
+        )
 
-            print("AI returned empty response.")
+        return reviews
 
-            return None
-
-        # Remove accidental quotation marks
-        reply = reply.strip('"').strip("'").strip()
-
-        # Length protection
-        if len(reply) > 300:
-
-            reply = reply[:297].rstrip() + "..."
-
-        return reply
 
     except Exception as e:
 
-        print(f"AI error: {e}")
+        print(
+            f"Failed to get Apple reviews: {e}"
+        )
+
+        return []
+
+
+# ==================================================
+# Check whether Apple review already has response
+# ==================================================
+
+def check_existing_response(
+    review_id
+):
+
+    url = (
+        f"{APPLE_API_BASE}/customerReviews/"
+        f"{review_id}/response"
+    )
+
+    try:
+
+        response = requests.get(
+            url,
+            headers=apple_headers(),
+            timeout=30
+        )
+
+
+        # Existing developer response
+        if response.status_code == 200:
+
+            try:
+
+                result = response.json()
+
+                data = result.get("data")
+
+                if data:
+                    return True
+
+            except Exception:
+                pass
+
+            # 200 but unable to safely determine state
+            return None
+
+
+        # No response exists
+        if response.status_code == 404:
+
+            return False
+
+
+        print(
+            f"Unexpected Apple response check "
+            f"status for {review_id}: "
+            f"HTTP {response.status_code}"
+        )
+
+        print(
+            response.text[:500]
+        )
+
+        # Fail safely
+        return None
+
+
+    except Exception as e:
+
+        print(
+            f"Failed to check existing response "
+            f"for {review_id}: {e}"
+        )
 
         return None
 
@@ -304,29 +763,41 @@ Return ONLY the final reply.
 # Post Apple response
 # ==================================================
 
-def post_reply(review_id, reply_text):
+def post_apple_reply(
+    review_id,
+    reply_text
+):
 
     url = (
-        "https://api.appstoreconnect.apple.com/v1/"
-        "customerReviewResponses"
+        f"{APPLE_API_BASE}/"
+        f"customerReviewResponses"
     )
+
 
     payload = {
         "data": {
-            "type": "customerReviewResponses",
+            "type":
+                "customerReviewResponses",
+
             "attributes": {
-                "responseBody": reply_text
+                "responseBody":
+                    reply_text
             },
+
             "relationships": {
                 "review": {
                     "data": {
-                        "id": review_id,
-                        "type": "customerReviews"
+                        "type":
+                            "customerReviews",
+
+                        "id":
+                            review_id
                     }
                 }
             }
         }
     }
+
 
     try:
 
@@ -334,237 +805,336 @@ def post_reply(review_id, reply_text):
             url,
             headers=apple_headers(),
             json=payload,
-            timeout=20
+            timeout=30
         )
 
-        if response.status_code in (200, 201):
 
-            print(f"Reply successful: {review_id}")
+        if response.status_code in [
+            200,
+            201
+        ]:
+
+            print(
+                f"Reply successful: "
+                f"{review_id}"
+            )
 
             return True
 
+
         print(
-            f"Reply failed {review_id}: "
-            f"HTTP {response.status_code} "
-            f"{response.text[:500]}"
+            f"Reply failed: "
+            f"{review_id} - "
+            f"HTTP {response.status_code}"
+        )
+
+        print(
+            response.text[:1000]
         )
 
         return False
+
 
     except Exception as e:
 
         print(
-            f"Reply error {review_id}: {e}"
+            f"Reply failed: "
+            f"{review_id} - {e}"
         )
 
         return False
 
 
 # ==================================================
-# Webhook report
+# Webhook
 # ==================================================
 
-def send_report(success, skipped, failed):
+def send_report(
+    success,
+    skipped,
+    failed
+):
 
     if not WEBHOOK_URL:
         return
 
+
     content = (
-        "🍎 Apple App Store Auto Reply completed\n"
+        "Apple App Store Auto Reply completed\n"
         f"New replies: {success}\n"
         f"Existing replies skipped: {skipped}\n"
         f"Failed / waiting for retry: {failed}"
     )
 
-    payload = {
+
+    data = {
         "msgtype": "text",
+
         "text": {
             "content": content
         }
     }
 
+
     try:
 
         requests.post(
             WEBHOOK_URL,
-            json=payload,
+            json=data,
             timeout=10
         )
 
     except Exception as e:
 
-        print(f"Webhook error: {e}")
+        print(
+            f"Webhook error: {e}"
+        )
 
 
 # ==================================================
-# Main
+# MAIN
 # ==================================================
 
-def main():
+print(
+    "Getting Apple App Store reviews..."
+)
 
-    print("Getting App Store reviews...")
+reviews = get_reviews()
 
-    reviews = get_reviews()
+print(
+    f"Reviews checked: "
+    f"{len(reviews)}"
+)
 
-    print(f"Reviews received: {len(reviews)}")
 
-    success_count = 0
-    skipped_count = 0
-    failed_count = 0
+success_count = 0
+skipped_count = 0
+failed_count = 0
 
-    for review in reviews:
 
-        review_id = review.get("id")
+for review in reviews:
 
-        if not review_id:
-            continue
+    review_id = review.get("id")
 
-        attributes = review.get("attributes", {})
+    attributes = review.get(
+        "attributes",
+        {}
+    )
 
-        review_text = (
-            attributes.get("body", "") or ""
-        ).strip()
+    rating = attributes.get(
+        "rating",
+        0
+    )
 
-        rating = attributes.get("rating", 0)
+    title = (
+        attributes
+        .get("title", "")
+        .strip()
+    )
 
-        if not review_text:
-            continue
+    review_text = (
+        attributes
+        .get("body", "")
+        .strip()
+    )
 
-        print("\n--------------------------------")
 
-        print(f"Review ID: {review_id}")
-        print(f"Rating: {rating}")
-        print(f"Review: {review_text[:200]}")
+    if not review_id:
+        continue
 
-        # ==========================================
-        # MOST IMPORTANT PROTECTION
-        # ==========================================
 
-        existing_reply = has_existing_reply(review_id)
+    if not review_text:
+        continue
 
-        # Already has Apple developer response:
-        # NEVER modify it.
-        if existing_reply is True:
-
-            print(
-                "SKIP: Developer response already exists. "
-                "It will NOT be modified."
-            )
-
-            skipped_count += 1
-
-            continue
-
-        # We could not safely determine whether a response exists.
-        # Do nothing to protect possible manual replies.
-        if existing_reply is None:
-
-            print(
-                "SKIP: Could not safely verify response status."
-            )
-
-            failed_count += 1
-
-            continue
-
-        # ==========================================
-        # No response -> AI reply
-        # ==========================================
-
-        print(
-            "No existing response. "
-            "Generating targeted reply..."
-        )
-
-        reply = generate_ai_reply(
-            review_text,
-            rating
-        )
-
-        # AI failed:
-        # Do NOT post a generic fallback.
-        if not reply:
-
-            print(
-                "AI generation failed. "
-                "No reply will be posted."
-            )
-
-            failed_count += 1
-
-            continue
-
-        print(
-            f"Generated reply ({len(reply)} chars): "
-            f"{reply}"
-        )
-
-        # ==========================================
-        # SECOND SAFETY CHECK
-        #
-        # Check Apple again immediately before POST.
-        # This protects against someone manually
-        # replying while this workflow is running.
-        # ==========================================
-
-        existing_reply_before_post = (
-            has_existing_reply(review_id)
-        )
-
-        if existing_reply_before_post is True:
-
-            print(
-                "SKIP: A developer response appeared "
-                "before posting. Do not overwrite."
-            )
-
-            skipped_count += 1
-
-            continue
-
-        if existing_reply_before_post is None:
-
-            print(
-                "SKIP: Could not safely re-check "
-                "response status."
-            )
-
-            failed_count += 1
-
-            continue
-
-        # ==========================================
-        # Still no response -> POST
-        # ==========================================
-
-        if post_reply(
-            review_id,
-            reply
-        ):
-
-            success_count += 1
-
-        else:
-
-            failed_count += 1
-
-        time.sleep(2)
-
-    print("\n================================")
 
     print(
-        f"Completed: "
-        f"{success_count} new replies, "
-        f"{skipped_count} existing replies skipped, "
-        f"{failed_count} failed/waiting."
+        "\n------------------------------"
     )
 
-    send_report(
-        success_count,
-        skipped_count,
-        failed_count
+    print(
+        f"Review ID: {review_id}"
+    )
+
+    print(
+        f"Rating: {rating}"
+    )
+
+    print(
+        f"Title: {title[:150]}"
+    )
+
+    print(
+        f"Review: "
+        f"{review_text[:250]}"
     )
 
 
-if __name__ == "__main__":
-    main()
+    # ==================================================
+    # Check existing developer response
+    # ==================================================
+
+    existing_status = (
+        check_existing_response(
+            review_id
+        )
+    )
+
+
+    if existing_status is True:
+
+        print(
+            "SKIP: Developer response already exists. "
+            "It will NOT be modified."
+        )
+
+        skipped_count += 1
+
+        continue
+
+
+    if existing_status is None:
+
+        print(
+            "SKIP: Could not safely determine "
+            "whether a response exists. "
+            "No reply posted."
+        )
+
+        failed_count += 1
+
+        continue
+
+
+    # ==================================================
+    # No response -> AI
+    # ==================================================
+
+    print(
+        "No existing response. "
+        "Generating targeted response..."
+    )
+
+
+    reply = ai_generate_reply(
+        review_text,
+        rating,
+        title
+    )
+
+
+    if not reply:
+
+        print(
+            "AI generation failed after retries. "
+            "No reply posted."
+        )
+
+        failed_count += 1
+
+        print(
+            f"Waiting {REQUEST_INTERVAL}s "
+            f"before next review..."
+        )
+
+        time.sleep(
+            REQUEST_INTERVAL
+        )
+
+        continue
+
+
+    print(
+        f"Generated reply "
+        f"({len(reply)} chars): "
+        f"{reply}"
+    )
+
+
+    # ==================================================
+    # CRITICAL:
+    # Check again immediately before posting.
+    #
+    # If you manually replied while AI was generating,
+    # automation MUST NOT overwrite it.
+    # ==================================================
+
+    current_status = (
+        check_existing_response(
+            review_id
+        )
+    )
+
+
+    if current_status is True:
+
+        print(
+            "SKIP: A developer response appeared "
+            "before posting. "
+            "It will NOT be overwritten."
+        )
+
+        skipped_count += 1
+
+        continue
+
+
+    if current_status is None:
+
+        print(
+            "SKIP: Could not safely verify "
+            "current response status. "
+            "No reply posted."
+        )
+
+        failed_count += 1
+
+        continue
+
+
+    # ==================================================
+    # Still unanswered -> post
+    # ==================================================
+
+    if post_apple_reply(
+        review_id,
+        reply
+    ):
+
+        success_count += 1
+
+    else:
+
+        failed_count += 1
+
+
+    print(
+        f"Waiting {REQUEST_INTERVAL}s "
+        f"before next review..."
+    )
+
+    time.sleep(
+        REQUEST_INTERVAL
+    )
+
+
+# ==================================================
+# Final report
+# ==================================================
+
+print(
+    "\n=============================="
+)
+
+print(
+    f"Completed: "
+    f"{success_count} new replies, "
+    f"{skipped_count} existing replies skipped, "
+    f"{failed_count} failed."
+)
+
+
+send_report(
+    success_count,
+    skipped_count,
+    failed_count
+)
