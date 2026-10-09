@@ -1,42 +1,41 @@
+
 import os
 import json
 import time
 import requests
+
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 
-# ==================================================
-# Configuration
-# ==================================================
+# ==========================================
+# CONFIG
+# ==========================================
 
-SERVICE_ACCOUNT_JSON = os.environ.get("SERVICE_ACCOUNT_JSON")
-PACKAGE_NAME = os.environ.get("PACKAGE_NAME")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+SERVICE_ACCOUNT_JSON = os.getenv("SERVICE_ACCOUNT_JSON")
+PACKAGE_NAME = os.getenv("PACKAGE_NAME")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "openai/gpt-oss-20b"
 
-# Wait between different reviews.
-REQUEST_INTERVAL = 4
+MIN_RATING = 4
+MAX_RATING = 5
 
-# Retry the same review when Groq returns 429 / temporary errors.
+REQUEST_INTERVAL = 4
 MAX_AI_RETRIES = 5
 
 
 print("=== Google Play Auto Reply ===")
-print("Rule: Existing developer replies are NEVER modified.")
+print("Only 4-5 star reviews will be replied to.")
+print("Existing developer replies will NEVER be modified.")
 print(f"AI model: {GROQ_MODEL}")
-print(
-    f"Rate-limit protection: "
-    f"{MAX_AI_RETRIES} retries + adaptive waiting."
-)
 
 
-# ==================================================
-# Check environment variables
-# ==================================================
+# ==========================================
+# ENVIRONMENT CHECK
+# ==========================================
 
 required_envs = {
     "SERVICE_ACCOUNT_JSON": SERVICE_ACCOUNT_JSON,
@@ -45,127 +44,181 @@ required_envs = {
 }
 
 missing = [
-    name
-    for name, value in required_envs.items()
+    key for key, value in required_envs.items()
     if not value
 ]
 
 if missing:
-    raise Exception(
-        f"Missing environment variables: {', '.join(missing)}"
+    raise RuntimeError(
+        "Missing environment variables: "
+        + ", ".join(missing)
     )
 
 
-# ==================================================
-# Google Play authentication
-# ==================================================
-
-creds_info = json.loads(SERVICE_ACCOUNT_JSON)
+# ==========================================
+# GOOGLE AUTH
+# ==========================================
 
 credentials = service_account.Credentials.from_service_account_info(
-    creds_info,
+    json.loads(SERVICE_ACCOUNT_JSON),
     scopes=[
         "https://www.googleapis.com/auth/androidpublisher"
-    ]
+    ],
 )
 
 service = build(
     "androidpublisher",
     "v3",
     credentials=credentials,
-    cache_discovery=False
+    cache_discovery=False,
 )
 
 
-# ==================================================
-# Extract AI reply
-# ==================================================
+# ==========================================
+# FETCH REVIEWS
+# ==========================================
+
+def get_reviews():
+
+    all_reviews = []
+    token = None
+
+    try:
+        while True:
+
+            params = {
+                "packageName": PACKAGE_NAME,
+                "maxResults": 100,
+            }
+
+            if token:
+                params["token"] = token
+
+            result = (
+                service.reviews()
+                .list(**params)
+                .execute()
+            )
+
+            reviews = result.get("reviews", [])
+            all_reviews.extend(reviews)
+
+            token = (
+                result.get("tokenPagination", {})
+                .get("nextPageToken")
+            )
+
+            if not token:
+                break
+
+        print(
+            f"Google Play API returned "
+            f"{len(all_reviews)} reviews."
+        )
+
+        return all_reviews
+
+    except Exception as e:
+        print(f"Failed to fetch reviews: {e}")
+        raise
+
+
+# ==========================================
+# PARSE REVIEW
+# ==========================================
+
+def parse_review(review):
+
+    review_id = review.get("reviewId")
+
+    user_comment = None
+    developer_comment = None
+
+    for item in review.get("comments", []):
+
+        if "userComment" in item:
+            user_comment = item["userComment"]
+
+        if "developerComment" in item:
+            developer_comment = item["developerComment"]
+
+    if not user_comment:
+        return None
+
+    text = str(
+        user_comment.get("text") or ""
+    ).strip()
+
+    try:
+        rating = int(
+            user_comment.get("starRating", 0)
+        )
+    except (ValueError, TypeError):
+        rating = 0
+
+    has_reply = developer_comment is not None
+
+    if not review_id or not text:
+        return None
+
+    return {
+        "id": review_id,
+        "text": text,
+        "rating": rating,
+        "has_reply": has_reply,
+    }
+
+
+# ==========================================
+# AI RESPONSE EXTRACTION
+# ==========================================
 
 def extract_ai_reply(result):
 
-    try:
+    choices = result.get("choices", [])
 
-        choices = result.get("choices", [])
-
-        if not choices:
-            print("AI response has no choices.")
-            return None
-
-        choice = choices[0]
-
-        message = choice.get("message", {})
-
-        content = message.get("content")
-
-        # Normal response
-        if isinstance(content, str):
-
-            content = content.strip()
-
-            if content:
-                return content
-
-        # Structured content compatibility
-        if isinstance(content, list):
-
-            parts = []
-
-            for item in content:
-
-                if isinstance(item, str):
-
-                    if item.strip():
-                        parts.append(item.strip())
-
-                elif isinstance(item, dict):
-
-                    text_value = item.get("text")
-
-                    if isinstance(text_value, str):
-
-                        if text_value.strip():
-                            parts.append(
-                                text_value.strip()
-                            )
-
-                    elif isinstance(text_value, dict):
-
-                        value = text_value.get("value")
-
-                        if (
-                            isinstance(value, str)
-                            and value.strip()
-                        ):
-                            parts.append(
-                                value.strip()
-                            )
-
-            if parts:
-                return "\n".join(parts).strip()
-
-        # Compatibility fallback
-        choice_text = choice.get("text")
-
-        if (
-            isinstance(choice_text, str)
-            and choice_text.strip()
-        ):
-            return choice_text.strip()
-
+    if not choices:
         return None
 
-    except Exception as e:
+    choice = choices[0]
+    message = choice.get("message") or {}
 
-        print(
-            f"Failed to parse AI response: {e}"
-        )
+    content = message.get("content")
 
-        return None
+    if isinstance(content, str):
+        return content.strip() or None
+
+    if isinstance(content, list):
+
+        parts = []
+
+        for item in content:
+
+            if isinstance(item, str):
+                parts.append(item)
+
+            elif isinstance(item, dict):
+
+                value = item.get("text")
+
+                if isinstance(value, str):
+                    parts.append(value)
+
+                elif isinstance(value, dict):
+                    text = value.get("value")
+
+                    if isinstance(text, str):
+                        parts.append(text)
+
+        reply = "\n".join(parts).strip()
+        return reply or None
+
+    return None
 
 
-# ==================================================
-# Clean AI reply
-# ==================================================
+# ==========================================
+# CLEAN REPLY
+# ==========================================
 
 def clean_reply(reply):
 
@@ -173,49 +226,36 @@ def clean_reply(reply):
         return None
 
     reply = (
-        reply
-        .strip()
+        reply.strip()
         .strip('"')
         .strip("'")
         .strip()
     )
 
-    prefixes = [
+    for prefix in [
         "Final answer:",
         "Final reply:",
         "Response:",
-        "Reply:"
-    ]
-
-    for prefix in prefixes:
+        "Reply:",
+    ]:
 
         if reply.lower().startswith(
             prefix.lower()
         ):
-
-            reply = (
-                reply[len(prefix):]
-                .strip()
-            )
+            reply = reply[len(prefix):].strip()
 
     if not reply:
         return None
 
-    # Google Play limit protection
     if len(reply) > 320:
-
-        reply = (
-            reply[:317]
-            .rstrip()
-            + "..."
-        )
+        reply = reply[:317].rstrip() + "..."
 
     return reply
 
 
-# ==================================================
-# Determine retry wait time
-# ==================================================
+# ==========================================
+# RETRY WAIT
+# ==========================================
 
 def get_retry_wait(response, attempt):
 
@@ -224,130 +264,89 @@ def get_retry_wait(response, attempt):
     )
 
     if retry_after:
-
         try:
-
-            wait_seconds = float(
-                retry_after
-            )
-
-            # Small safety buffer
             return max(
                 2,
-                wait_seconds + 2
+                float(retry_after) + 2
             )
-
-        except Exception:
+        except (ValueError, TypeError):
             pass
 
-    # Fallback exponential waiting:
-    # 10 -> 20 -> 40 -> 60 -> 60
-    fallback = min(
+    return min(
         60,
         10 * (2 ** (attempt - 1))
     )
 
-    return fallback
 
+# ==========================================
+# GENERATE AI REPLY
+# ==========================================
 
-# ==================================================
-# Generate targeted AI reply
-# ==================================================
-
-def ai_generate_reply(
-    review_text,
-    rating
-):
-
-    headers = {
-        "Authorization":
-            f"Bearer {GROQ_API_KEY}",
-        "Content-Type":
-            "application/json"
-    }
+def generate_reply(review_text, rating):
 
     prompt = f"""
 You are the official customer support representative for PitPat.
 
-Write ONE short public response to this Google Play review.
+Write ONE natural public reply to this Google Play review.
 
-Star rating: {rating}/5
+Rating: {rating}/5
 
 Review:
 "{review_text}"
 
 Rules:
 
-1. Reply in the SAME LANGUAGE as the original review.
+1. Reply in the SAME LANGUAGE as the review.
 
-2. Read the review carefully and respond to what the user
-   actually said.
+2. Read the review carefully.
 
-3. The reply must mention the specific experience, feature,
-   praise, complaint, or suggestion in the review.
+3. Mention the SPECIFIC feature, experience, or
+   positive detail the user described.
 
-4. NEVER use generic replies such as:
+4. Never give a generic response such as:
    "Thanks for your feedback."
-   "We'll address the issues you raised."
-   "Thank you for your feedback. We will address your concerns."
+   "We appreciate your support."
 
-5. Positive review:
-   thank the user naturally and specifically mention what
-   they liked.
+5. If the user praises a feature, mention that
+   exact feature naturally.
 
-6. Negative review:
-   acknowledge the specific problem and apologize naturally
-   when appropriate.
+6. If the review contains both praise and a
+   suggestion, acknowledge both.
 
-7. If the review mentions audio cues, voice coaching,
-   treadmill connection, device pairing, workout tracking,
-   achievements, milestones, PitPat Band, health data,
-   Apple Health, subscription, payment, ads, account,
-   reports, AI workouts, social features or another
-   specific function, respond to that exact topic.
+7. Do not invent features, fixes, policies,
+   refunds, compensation, or promises.
 
-8. Do NOT invent troubleshooting steps.
+8. Do not ask users to change their ratings.
 
-9. Do NOT invent refunds, compensation or policies.
+9. Do not mention AI or automation.
 
-10. Do NOT claim an issue has already been fixed unless
-    that information is known.
+10. Be friendly, professional, and natural.
 
-11. Do NOT ask the user to change their rating.
+11. Avoid repetitive wording.
 
-12. Do NOT mention AI, automation or automated replies.
-
-13. Friendly, professional and natural tone.
-
-14. Avoid repetitive wording.
-
-15. Maximum 320 characters.
+12. Maximum 320 characters.
 
 Return ONLY the final public reply.
 """
 
-    data = {
+    payload = {
         "model": GROQ_MODEL,
-
         "messages": [
             {
                 "role": "user",
-                "content": prompt
+                "content": prompt,
             }
         ],
-
         "temperature": 0.5,
-
         "max_completion_tokens": 350,
-
-        # GPT-OSS:
-        # short review replies do not need heavy reasoning.
         "reasoning_effort": "low",
-
-        # Do not return reasoning content.
         "include_reasoning": False,
+        "stream": False,
+    }
 
-        "stream": False
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
     }
 
     for attempt in range(
@@ -357,735 +356,329 @@ Return ONLY the final public reply.
 
         print(
             f"AI request attempt "
-            f"{attempt}/{MAX_AI_RETRIES}..."
+            f"{attempt}/{MAX_AI_RETRIES}"
         )
 
         try:
-
             response = requests.post(
                 GROQ_URL,
                 headers=headers,
-                json=data,
-                timeout=60
+                json=payload,
+                timeout=60,
             )
 
-        except requests.exceptions.Timeout:
+        except requests.RequestException as e:
 
-            print(
-                "AI request timed out."
-            )
+            print(f"AI network error: {e}")
 
             if attempt < MAX_AI_RETRIES:
-
-                wait_seconds = min(
-                    60,
-                    10 * attempt
-                )
-
-                print(
-                    f"Waiting {wait_seconds}s "
-                    f"before retry..."
-                )
-
                 time.sleep(
-                    wait_seconds
+                    min(60, 10 * attempt)
                 )
-
                 continue
 
             return None
-
-        except Exception as e:
-
-            print(
-                f"AI request error: {e}"
-            )
-
-            if attempt < MAX_AI_RETRIES:
-
-                wait_seconds = min(
-                    60,
-                    10 * attempt
-                )
-
-                print(
-                    f"Waiting {wait_seconds}s "
-                    f"before retry..."
-                )
-
-                time.sleep(
-                    wait_seconds
-                )
-
-                continue
-
-            return None
-
 
         print(
             f"AI HTTP status: "
             f"{response.status_code}"
         )
 
-
-        # ==================================================
-        # SUCCESS
-        # ==================================================
-
         if response.status_code == 200:
 
             try:
-
                 result = response.json()
+                reply = extract_ai_reply(result)
+                return clean_reply(reply)
 
-            except Exception as e:
-
-                print(
-                    f"AI returned invalid JSON: {e}"
-                )
-
+            except (ValueError, TypeError) as e:
+                print(f"AI parse error: {e}")
                 return None
-
-
-            reply = extract_ai_reply(
-                result
-            )
-
-            reply = clean_reply(
-                reply
-            )
-
-
-            if reply:
-
-                print(
-                    "AI reply generated successfully."
-                )
-
-                return reply
-
-
-            print(
-                "AI returned no usable final reply."
-            )
-
-            # Safe diagnostic
-            try:
-
-                safe_debug = json.dumps(
-                    result,
-                    ensure_ascii=False
-                )
-
-                print(
-                    "AI response structure: "
-                    + safe_debug[:2500]
-                )
-
-            except Exception:
-                pass
-
-            return None
-
-
-        # ==================================================
-        # RATE LIMIT
-        # ==================================================
 
         if response.status_code == 429:
 
-            wait_seconds = get_retry_wait(
-                response,
-                attempt
-            )
-
-            print(
-                "Groq rate limit reached."
-            )
+            print("Groq rate limit reached.")
 
             if attempt < MAX_AI_RETRIES:
 
-                print(
-                    f"Waiting {wait_seconds:.1f}s "
-                    f"before automatic retry..."
-                )
-
-                time.sleep(
-                    wait_seconds
-                )
-
-                continue
-
-            print(
-                "Maximum rate-limit retries reached."
-            )
-
-            return None
-
-
-        # ==================================================
-        # TEMPORARY SERVER ERRORS
-        # ==================================================
-
-        if response.status_code in [
-            500,
-            502,
-            503,
-            504
-        ]:
-
-            if attempt < MAX_AI_RETRIES:
-
-                wait_seconds = min(
-                    60,
-                    10 * attempt
+                wait = get_retry_wait(
+                    response,
+                    attempt
                 )
 
                 print(
-                    f"Temporary Groq error. "
-                    f"Waiting {wait_seconds}s "
-                    f"before retry..."
+                    f"Waiting {wait:.1f}s "
+                    "before retry..."
                 )
 
-                time.sleep(
-                    wait_seconds
-                )
-
+                time.sleep(wait)
                 continue
 
             return None
 
+        if response.status_code in (
+            500, 502, 503, 504
+        ):
 
-        # ==================================================
-        # NON-RETRYABLE ERROR
-        # ==================================================
+            if attempt < MAX_AI_RETRIES:
+                time.sleep(
+                    min(60, 10 * attempt)
+                )
+                continue
+
+            return None
 
         print(
             f"AI request failed: "
-            f"HTTP {response.status_code}"
-        )
-
-        print(
-            f"AI error body: "
-            f"{response.text[:1000]}"
+            f"{response.text[:500]}"
         )
 
         return None
-
 
     return None
 
 
-# ==================================================
-# Get Google Play reviews
-# ==================================================
+# ==========================================
+# RECHECK BEFORE POSTING
+# ==========================================
 
-def get_all_reviews():
-
-    results = []
+def check_reply_status(review_id):
 
     try:
-
-        response = (
-            service
-            .reviews()
-            .list(
+        result = (
+            service.reviews()
+            .get(
                 packageName=PACKAGE_NAME,
-                maxResults=100
+                reviewId=review_id,
             )
             .execute()
         )
 
-        reviews = response.get(
-            "reviews",
-            []
-        )
+        for item in result.get("comments", []):
 
-        print(
-            f"Google Play API returned "
-            f"{len(reviews)} reviews."
-        )
+            if "developerComment" in item:
+                return True
 
-        for review in reviews:
-
-            review_id = review.get(
-                "reviewId"
-            )
-
-            if not review_id:
-                continue
-
-
-            comments = review.get(
-                "comments",
-                []
-            )
-
-            user_comment = None
-
-            developer_comment = None
-
-
-            for comment in comments:
-
-                if "userComment" in comment:
-
-                    user_comment = (
-                        comment[
-                            "userComment"
-                        ]
-                    )
-
-                if "developerComment" in comment:
-
-                    developer_comment = (
-                        comment[
-                            "developerComment"
-                        ]
-                    )
-
-
-            if not user_comment:
-                continue
-
-
-            review_text = (
-                user_comment
-                .get("text", "")
-                .strip()
-            )
-
-            star_rating = (
-                user_comment
-                .get("starRating", 0)
-            )
-
-
-            if not review_text:
-                continue
-
-
-            has_developer_reply = bool(
-                developer_comment
-                and developer_comment
-                .get("text", "")
-                .strip()
-            )
-
-
-            results.append({
-                "id":
-                    review_id,
-
-                "text":
-                    review_text,
-
-                "rating":
-                    star_rating,
-
-                "has_developer_reply":
-                    has_developer_reply
-            })
-
-
-        print(
-            f"Valid reviews received: "
-            f"{len(results)}"
-        )
-
-        return results
-
-
-    except Exception as e:
-
-        print(
-            f"Failed to get Google Play reviews: {e}"
-        )
-
-        return []
-
-
-# ==================================================
-# Re-check reply before posting
-# ==================================================
-
-def has_reply_now(
-    review_id
-):
-
-    try:
-
-        response = (
-            service
-            .reviews()
-            .list(
-                packageName=PACKAGE_NAME,
-                maxResults=100
-            )
-            .execute()
-        )
-
-        reviews = response.get(
-            "reviews",
-            []
-        )
-
-
-        for review in reviews:
-
-            if (
-                review.get("reviewId")
-                != review_id
-            ):
-                continue
-
-
-            comments = review.get(
-                "comments",
-                []
-            )
-
-
-            for comment in comments:
-
-                developer_comment = (
-                    comment.get(
-                        "developerComment"
-                    )
-                )
-
-
-                if (
-                    developer_comment
-                    and developer_comment
-                    .get("text", "")
-                    .strip()
-                ):
-
-                    return True
-
-
-            return False
-
-
-        # If the review cannot be verified,
-        # fail safely.
-        return None
-
-
-    except Exception as e:
-
-        print(
-            f"Unable to re-check reply status "
-            f"for {review_id}: {e}"
-        )
-
-        return None
-
-
-# ==================================================
-# Post Google Play reply
-# ==================================================
-
-def post_reply(
-    review_id,
-    reply_text
-):
-
-    if not reply_text:
         return False
 
+    except Exception as e:
 
-    if len(reply_text) > 320:
-
-        reply_text = (
-            reply_text[:317]
-            .rstrip()
-            + "..."
+        print(
+            f"Cannot verify review "
+            f"{review_id}: {e}"
         )
 
+        return None
+
+
+# ==========================================
+# POST REPLY
+# ==========================================
+
+def post_reply(review_id, reply):
 
     try:
-
         (
-            service
-            .reviews()
+            service.reviews()
             .reply(
-                packageName=
-                    PACKAGE_NAME,
-
-                reviewId=
-                    review_id,
-
+                packageName=PACKAGE_NAME,
+                reviewId=review_id,
                 body={
-                    "replyText":
-                        reply_text
-                }
+                    "replyText": reply
+                },
             )
             .execute()
         )
 
-
         print(
-            f"Reply successful: "
-            f"{review_id}"
+            f"Reply successful: {review_id}"
         )
 
         return True
-
 
     except Exception as e:
 
         print(
             f"Reply failed: "
-            f"{review_id} - {e}"
+            f"{review_id}: {e}"
         )
 
         return False
 
 
-# ==================================================
-# Webhook report
-# ==================================================
+# ==========================================
+# WEBHOOK
+# ==========================================
 
-def send_report(
-    success,
-    skipped,
-    failed
-):
+def send_report(success, skipped, failed):
 
     if not WEBHOOK_URL:
         return
 
-
     content = (
         "Google Play Auto Reply completed\n"
         f"New replies: {success}\n"
-        f"Existing replies skipped: {skipped}\n"
-        f"Failed / waiting for retry: {failed}"
+        f"Skipped: {skipped}\n"
+        f"Failed: {failed}"
     )
-
-
-    data = {
-        "msgtype": "text",
-
-        "text": {
-            "content": content
-        }
-    }
-
 
     try:
-
         requests.post(
             WEBHOOK_URL,
-            json=data,
-            timeout=10
+            json={
+                "msgtype": "text",
+                "text": {
+                    "content": content
+                },
+            },
+            timeout=10,
         )
 
-    except Exception as e:
-
-        print(
-            f"Webhook error: {e}"
-        )
+    except requests.RequestException as e:
+        print(f"Webhook error: {e}")
 
 
-# ==================================================
+# ==========================================
 # MAIN
-# ==================================================
+# ==========================================
 
-print(
-    "Getting Google Play reviews..."
-)
+def main():
 
-reviews = get_all_reviews()
+    reviews = get_reviews()
 
-print(
-    f"Reviews checked: "
-    f"{len(reviews)}"
-)
+    success = 0
+    skipped = 0
+    failed = 0
 
+    for raw_review in reviews:
 
-success_count = 0
-skipped_count = 0
-failed_count = 0
+        review = parse_review(raw_review)
 
+        if not review:
+            continue
 
-for review in reviews:
-
-    review_id = review["id"]
-    review_text = review["text"]
-    rating = review["rating"]
-
-
-    print(
-        "\n------------------------------"
-    )
-
-    print(
-        f"Review ID: {review_id}"
-    )
-
-    print(
-        f"Rating: {rating}"
-    )
-
-    print(
-        f"Review: "
-        f"{review_text[:250]}"
-    )
-
-
-    # ==================================================
-    # Existing reply -> NEVER TOUCH
-    # ==================================================
-
-    if review[
-        "has_developer_reply"
-    ]:
+        review_id = review["id"]
+        rating = review["rating"]
 
         print(
-            "SKIP: Developer reply already exists. "
-            "It will NOT be modified."
+            "\n------------------------------"
         )
-
-        skipped_count += 1
-
-        continue
-
-
-    # ==================================================
-    # No reply -> generate
-    # ==================================================
-
-    print(
-        "No existing reply. "
-        "Generating targeted response..."
-    )
-
-
-    reply = ai_generate_reply(
-        review_text,
-        rating
-    )
-
-
-    # AI ultimately failed:
-    # leave review unanswered for next run.
-    if not reply:
 
         print(
-            "AI generation failed after retries. "
-            "No reply posted."
+            f"Review ID: {review_id}"
         )
 
-        failed_count += 1
+        print(f"Rating: {rating}")
 
-        # Avoid immediately hammering API again.
+        # ----------------------------------
+        # ONLY 4-5 STAR REVIEWS
+        # ----------------------------------
+
+        if rating < MIN_RATING or rating > MAX_RATING:
+
+            print(
+                "SKIP: Rating is below 4 stars. "
+                "No reply will be posted."
+            )
+
+            skipped += 1
+            continue
+
+        # ----------------------------------
+        # EXISTING REPLY
+        # ----------------------------------
+
+        if review["has_reply"]:
+
+            print(
+                "SKIP: Developer reply already exists. "
+                "It will NOT be modified."
+            )
+
+            skipped += 1
+            continue
+
+        # ----------------------------------
+        # GENERATE TARGETED REPLY
+        # ----------------------------------
+
         print(
-            f"Waiting {REQUEST_INTERVAL}s "
-            f"before next review..."
+            "Positive review without reply. "
+            "Generating AI response..."
         )
 
-        time.sleep(
-            REQUEST_INTERVAL
+        reply = generate_reply(
+            review["text"],
+            rating,
         )
 
-        continue
+        if not reply:
 
+            print(
+                "AI generation failed. "
+                "No reply posted."
+            )
 
-    print(
-        f"Generated reply "
-        f"({len(reply)} chars): "
-        f"{reply}"
-    )
+            failed += 1
+            time.sleep(REQUEST_INTERVAL)
+            continue
 
+        print(
+            f"Generated reply "
+            f"({len(reply)} chars): {reply}"
+        )
 
-    # ==================================================
-    # Re-check immediately before posting
-    # ==================================================
+        # ----------------------------------
+        # FINAL SAFETY CHECK
+        # ----------------------------------
 
-    current_reply_status = (
-        has_reply_now(
+        current_status = check_reply_status(
             review_id
         )
-    )
 
+        if current_status is True:
 
-    if current_reply_status is True:
+            print(
+                "SKIP: Existing reply detected "
+                "before posting."
+            )
 
-        print(
-            "SKIP: A developer reply appeared "
-            "before posting. "
-            "It will NOT be overwritten."
-        )
+            skipped += 1
+            continue
 
-        skipped_count += 1
+        if current_status is None:
 
-        continue
+            print(
+                "SAFE SKIP: Cannot verify "
+                "existing reply status."
+            )
 
+            failed += 1
+            continue
 
-    if current_reply_status is None:
+        # ----------------------------------
+        # POST
+        # ----------------------------------
 
-        print(
-            "SKIP: Could not safely verify "
-            "current reply status. "
-            "No reply posted."
-        )
+        if post_reply(review_id, reply):
+            success += 1
+        else:
+            failed += 1
 
-        failed_count += 1
-
-        continue
-
-
-    # ==================================================
-    # Still unanswered -> post
-    # ==================================================
-
-    if post_reply(
-        review_id,
-        reply
-    ):
-
-        success_count += 1
-
-    else:
-
-        failed_count += 1
-
-
-    # ==================================================
-    # Slow down before next AI request
-    # ==================================================
+        time.sleep(REQUEST_INTERVAL)
 
     print(
-        f"Waiting {REQUEST_INTERVAL}s "
-        f"before next review..."
+        "\n=============================="
     )
 
-    time.sleep(
-        REQUEST_INTERVAL
+    print(
+        f"Completed: {success} new replies, "
+        f"{skipped} skipped, "
+        f"{failed} failed."
     )
 
-
-# ==================================================
-# Final report
-# ==================================================
-
-print(
-    "\n=============================="
-)
-
-print(
-    f"Completed: "
-    f"{success_count} new replies, "
-    f"{skipped_count} existing replies skipped, "
-    f"{failed_count} failed."
-)
+    send_report(success, skipped, failed)
 
 
-send_report(
-    success_count,
-    skipped_count,
-    failed_count
-)
+if __name__ == "__main__":
+    main()
